@@ -31,6 +31,8 @@ from .security.permission_engine import permission_engine
 from .security.kill_switch import kill_switch
 from .api.oauth_routes import router as oauth_router
 from .api.integration_routes import router as integration_router
+from .scheduler.manager import scheduler_manager
+from .scheduler.api import router as schedules_router
 
 
 # ---------------------------------------------------------------------------
@@ -43,9 +45,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ensure_runtime_dirs()
     tool_registry.discover()
     event_bus.publish("SERVICE_STARTED", {"version": settings.service_version})
+    await scheduler_manager.start()
     try:
         yield
     finally:
+        await scheduler_manager.shutdown()
         event_bus.publish("SERVICE_STOPPED", {})
         await asyncio.sleep(0.1)  # let pending events flush
 
@@ -65,6 +69,7 @@ app = FastAPI(
         {"name": "kill-switch", "description": "Emergency stop / reset."},
         {"name": "oauth", "description": "OAuth provider integrations (Google, GitHub, Facebook)."},
         {"name": "integrations", "description": "Messaging integrations (Email, WhatsApp, Telegram, Discord)."},
+        {"name": "scheduler", "description": "Schedule workflows via cron, file events, hotkeys, webhooks, system events."},
     ],
 )
 
@@ -107,6 +112,17 @@ async def health() -> dict:
         "mock_mode": settings.mock_mode,
         "kill_switch": kill_switch.engaged,
     }
+
+
+@app.get("/scheduler/health", tags=["scheduler"])
+async def scheduler_health() -> dict:
+    """Return scheduler runtime status — running flag, jobs_count, next_run.
+
+    Master prompt section 24 — scheduler health endpoint. The endpoint
+    is intentionally unauthenticated so the Electron shell can poll it
+    for status display.
+    """
+    return scheduler_manager.health()
 
 
 # ---------------------------------------------------------------------------
@@ -316,3 +332,4 @@ async def unhandled_exc(request, exc: Exception) -> JSONResponse:
 
 app.include_router(oauth_router, prefix="/oauth", tags=["oauth"])
 app.include_router(integration_router, prefix="/integrations", tags=["integrations"])
+app.include_router(schedules_router, prefix="/schedules", tags=["scheduler"])

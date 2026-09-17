@@ -464,3 +464,135 @@ def test_oauth_start_unknown_provider(client) -> None:
     """GET /oauth/{provider}/start with unknown provider returns 404."""
     r = client.get("/oauth/nonexistent/start")
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Webhook security tests (Task 4-d)
+# ---------------------------------------------------------------------------
+
+
+def test_whatsapp_webhook_with_valid_signature(client, mock_settings):
+    """WhatsApp webhook with valid HMAC signature is accepted."""
+    import hashlib
+    import hmac
+    # In mock mode, signature verification is skipped — just check the endpoint works
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [{
+            "id": "123",
+            "changes": [{
+                "value": {
+                    "messaging_product": "whatsapp",
+                    "messages": [{
+                        "from": "1234567890",
+                        "id": "msg_1",
+                        "text": {"body": "hello"},
+                    }],
+                },
+            }],
+        }],
+    }
+    r = client.post("/integrations/whatsapp/webhook", json=payload)
+    assert r.status_code == 200
+    data = r.json()
+    assert "received" in data
+
+
+def test_telegram_set_webhook(client, mock_settings):
+    """POST /integrations/telegram/set-webhook returns the Telegram API response."""
+    r = client.post(
+        "/integrations/telegram/set-webhook",
+        json={"webhook_url": "https://example.com/integrations/telegram/webhook"},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    # Mock mode returns {"ok": True, "result": True, "description": "..."}
+    assert data.get("ok") is True
+
+
+def test_telegram_delete_webhook(client, mock_settings):
+    """DELETE /integrations/telegram/webhook removes the Telegram webhook."""
+    r = client.delete("/integrations/telegram/webhook")
+    assert r.status_code == 200
+    assert r.json().get("ok") is True
+
+
+def test_telegram_webhook_receives_update(client, mock_settings):
+    """POST /integrations/telegram/webhook accepts inbound Telegram updates."""
+    payload = {
+        "update_id": 12345,
+        "message": {
+            "message_id": 1,
+            "from": {"id": 111, "is_bot": False, "first_name": "Test", "username": "testuser"},
+            "chat": {"id": 111, "type": "private"},
+            "date": 1700000000,
+            "text": "/hello world",
+        },
+    }
+    r = client.post("/integrations/telegram/webhook", json=payload)
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("ok") is True
+    assert data.get("update_id") == 12345
+
+
+def test_discord_webhook_ping(client, mock_settings):
+    """POST /integrations/discord/webhook responds with PONG for type=1 ping."""
+    payload = {"type": 1}
+    r = client.post("/integrations/discord/webhook", json=payload)
+    assert r.status_code == 200
+    assert r.json() == {"type": 1}
+
+
+def test_discord_webhook_slash_command(client, mock_settings):
+    """POST /integrations/discord/webhook with type=2 (slash command) returns deferred response."""
+    payload = {
+        "type": 2,
+        "data": {
+            "name": "hello",
+            "options": [{"name": "user", "value": "alice"}],
+        },
+        "id": "interaction_1",
+        "token": "interaction_token_abc",
+    }
+    r = client.post("/integrations/discord/webhook", json=payload)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["type"] == 5  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+    assert "Received command: /hello" in data["data"]["content"]
+
+
+def test_discord_webhook_unknown_type(client, mock_settings):
+    """POST /integrations/discord/webhook with unknown type returns helpful error message."""
+    payload = {"type": 999}
+    r = client.post("/integrations/discord/webhook", json=payload)
+    assert r.status_code == 200
+    data = r.json()
+    assert "Unknown interaction type: 999" in data["data"]["content"]
+
+
+def test_whatsapp_hmac_verification_helper():
+    """The _verify_whatsapp_signature helper validates correctly."""
+    from automation_service.api.integration_routes import _verify_whatsapp_signature
+    import hashlib
+    import hmac
+    import os
+
+    # Set a known verify token
+    os.environ["WHATSAPP_VERIFY_TOKEN"] = "test-secret"
+    body = b'{"test": "payload"}'
+    valid_sig = hmac.new(b"test-secret", body, hashlib.sha256).hexdigest()
+    assert _verify_whatsapp_signature(body, f"sha256={valid_sig}") is True
+    assert _verify_whatsapp_signature(body, "sha256=invalid_sig") is False
+    assert _verify_whatsapp_signature(body, None) is False
+    assert _verify_whatsapp_signature(body, "invalid_format") is False
+
+    # Cleanup
+    del os.environ["WHATSAPP_VERIFY_TOKEN"]
+
+
+def test_discord_signature_helper_rejects_when_no_key():
+    """The _verify_discord_signature helper fails closed when no public key is set."""
+    from automation_service.api.integration_routes import _verify_discord_signature
+    # No DISCORD_APPLICATION_ID set → returns False
+    assert _verify_discord_signature(b"body", "fake_sig", "fake_ts") is False

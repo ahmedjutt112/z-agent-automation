@@ -199,23 +199,34 @@ class TelegramBot:
         if not isinstance(result, dict) or not result.get("ok"):
             return out
         for upd in result.get("result", []):
-            msg = upd.get("message") or upd.get("edited_message") or {}
-            chat_id = msg.get("chat", {}).get("id", "")
-            from_user = msg.get("from", {}).get("username") or msg.get("from", {}).get("first_name", "")
-            text = msg.get("text", "")
-            ts = msg.get("date")
-            received = datetime.fromtimestamp(int(ts), tz=timezone.utc) if ts else None
-            out.append(
-                TelegramUpdate(
-                    update_id=upd.get("update_id", 0),
-                    chat_id=str(chat_id),
-                    from_user=from_user,
-                    text=text,
-                    received_at=received,
-                    raw_json=upd,
-                )
-            )
+            out.append(self._normalize_update(upd))
         return out
+
+    @staticmethod
+    def _normalize_update(upd: dict[str, Any]) -> TelegramUpdate:
+        """Normalize a raw Telegram update dict into a TelegramUpdate model.
+
+        Handles `message`, `edited_message`, `channel_post`, and `callback_query`.
+        Used by both get_updates() and the webhook receiver.
+        """
+        msg = upd.get("message") or upd.get("edited_message") or upd.get("channel_post") or {}
+        # callback_query has its own message subfield
+        if not msg and upd.get("callback_query"):
+            msg = upd["callback_query"].get("message", {})
+        chat_id = msg.get("chat", {}).get("id", "")
+        from_info = msg.get("from", {}) or upd.get("callback_query", {}).get("from", {})
+        from_user = from_info.get("username") or from_info.get("first_name", "")
+        text = msg.get("text", "") or upd.get("callback_query", {}).get("data", "")
+        ts = msg.get("date") or upd.get("callback_query", {}).get("message", {}).get("date")
+        received = datetime.fromtimestamp(int(ts), tz=timezone.utc) if ts else None
+        return TelegramUpdate(
+            update_id=upd.get("update_id", 0),
+            chat_id=str(chat_id),
+            from_user=from_user,
+            text=text,
+            received_at=received,
+            raw_json=upd,
+        )
 
     async def set_webhook(self, url: str) -> dict[str, Any]:
         """Register a webhook URL — Telegram will POST updates there."""

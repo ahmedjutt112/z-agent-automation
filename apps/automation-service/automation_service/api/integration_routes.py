@@ -5,21 +5,28 @@ Endpoints (mounted under ``/integrations`` in main.py):
 - ``POST /integrations/email/send`` — body: {to, subject, body, html?}.
 - ``GET /integrations/email/inbox`` — query: limit (default 10).
 - ``POST /integrations/whatsapp/send-text`` — body: {to, message}.
-- ``POST /integrations/whatsapp/webhook`` — receives WhatsApp webhooks (no
-  IPC token — relies on the verify_token instead).
+- ``POST /integrations/whatsapp/webhook`` — receives WhatsApp webhooks (with
+  X-Hub-Signature-256 HMAC verification).
 - ``GET /integrations/whatsapp/verify`` — WhatsApp webhook verification.
 - ``POST /integrations/telegram/send`` — body: {chat_id, text, parse_mode?}.
+- ``POST /integrations/telegram/set-webhook`` — body: {webhook_url}.
+- ``DELETE /integrations/telegram/webhook`` — removes Telegram webhook.
+- ``POST /integrations/telegram/webhook`` — receives Telegram updates.
 - ``POST /integrations/discord/send`` — body: {channel_id, content}.
+- ``POST /integrations/discord/webhook`` — Discord interactions endpoint
+  (slash command handler; verifies Ed25519 signature).
 
-All POST routes (except the WhatsApp webhook receiver) require the IPC bearer
+All POST routes (except the public webhook receivers) require the IPC bearer
 token via the ``_verify_ipc_token`` dependency.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -29,6 +36,7 @@ from ..integrations.whatsapp import WhatsAppClient
 from ..integrations.telegram import TelegramBot
 from ..integrations.discord import DiscordBot
 from ..integrations.oauth import OAUTH_PROVIDERS, get_oauth_provider
+from ..security.credentials import get_credential
 
 
 router = APIRouter()
@@ -70,6 +78,79 @@ class TelegramSendRequest(BaseModel):
 class DiscordSendRequest(BaseModel):
     channel_id: str | int
     content: str
+
+
+class TelegramWebhookRequest(BaseModel):
+    webhook_url: str
+
+
+class DiscordInteraction(BaseModel):
+    """Discord slash-command interaction payload (application/json)."""
+    type: int  # 1=PING, 2=APPLICATION_COMMAND, 3=MESSAGE_COMPONENT
+    data: dict[str, Any] | None = None
+    id: str | None = None
+    token: str | None = None  # interaction token (for followups)
+
+
+# ---------------------------------------------------------------------------
+# HMAC verification helpers
+# ---------------------------------------------------------------------------
+
+
+def _verify_whatsapp_signature(raw_body: bytes, signature_header: str | None) -> bool:
+    """Verify the X-Hub-Signature-256 header against the app's verify token.
+
+    WhatsApp Cloud API signs webhook POST bodies with HMAC-SHA256 using the
+    app's WHATSAPP_VERIFY_TOKEN as the secret (App Secret). We compute the
+    expected signature and compare in constant time to prevent timing attacks.
+    """
+    if not signature_header:
+        return False
+    if not signature_header.startswith("sha256="):
+        return False
+    expected_sig = signature_header.removeprefix("sha256=")
+
+    app_secret = get_credential("whatsapp_verify_token") or "default-secret"
+    computed = hmac.new(
+        app_secret.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    return hmac.compare_digest(computed, expected_sig)
+
+
+def _verify_discord_signature(
+    raw_body: bytes,
+    signature: str | None,
+    timestamp: str | None,
+) -> bool:
+    """Verify Discord interactions webhook signature (Ed25519 over timestamp + body).
+
+    Discord signs every interaction with the bot's public key. We use
+    PyNaCl if available; otherwise we fail closed (reject the request).
+
+    Master prompt §55: never accept unsigned interactions.
+    """
+    if not signature or not timestamp:
+        return False
+    public_key = get_credential("discord_application_id")
+    if not public_key:
+        return False
+    try:
+        from nacl.signing import VerifyKey  # type: ignore
+        from nacl.exceptions import BadSignatureError  # type: ignore
+
+        verify_key = VerifyKey(bytes.fromhex(public_key))
+        verify_key.verify(f"{timestamp}{raw_body.decode('utf-8')}".encode(), bytes.fromhex(signature))
+        return True
+    except ImportError:
+        # PyNaCl not installed — fail closed
+        logger.warning("PyNaCl not installed; rejecting Discord interaction. Install with: pip install pynacl")
+        return False
+    except (BadSignatureError, ValueError, Exception) as exc:
+        logger.warning("Discord signature verification failed: {}", exc)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -204,13 +285,28 @@ async def whatsapp_verify(
 
 
 @router.post("/whatsapp/webhook")
-async def whatsapp_webhook(payload: dict[str, Any]) -> dict[str, Any]:
-    """Receive an inbound WhatsApp webhook payload.
+async def whatsapp_webhook(request: Request) -> dict[str, Any]:
+    """Receive an inbound WhatsApp webhook payload with HMAC verification.
 
-    Public endpoint — relies on the provider having verified the webhook URL
-    via ``/whatsapp/verify`` (which checks the verify_token). Payloads are
-    parsed for inbound messages and logged for downstream processing.
+    Master prompt §55: verify the X-Hub-Signature-256 header to ensure the
+    payload is genuinely from Meta. If verification fails, return 403.
+
+    In mock mode (settings.mock_mode=True), signature verification is skipped
+    so tests and local development can use unverified payloads.
     """
+    raw_body = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256")
+
+    if not settings.mock_mode:
+        if not _verify_whatsapp_signature(raw_body, signature):
+            logger.warning("WhatsApp webhook signature verification failed")
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid signature")
+
+    try:
+        payload: dict[str, Any] = await request.json()
+    except Exception as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON: {exc}")
+
     client = WhatsAppClient()
     messages = client.receive_webhook(payload)
     for m in messages:
@@ -236,6 +332,67 @@ async def telegram_send(req: TelegramSendRequest) -> dict[str, Any]:
     return result
 
 
+@router.post("/telegram/set-webhook", dependencies=[Depends(_verify_ipc_token)])
+async def telegram_set_webhook(req: TelegramWebhookRequest) -> dict[str, Any]:
+    """Register a webhook URL with Telegram for inbound messages.
+
+    Telegram will POST updates to {webhook_url} — typically you'd point this
+    at https://your-domain/integrations/telegram/webhook.
+    """
+    client = TelegramBot()
+    try:
+        result = await client.set_webhook(req.webhook_url)
+    except Exception as exc:
+        logger.error("Telegram setWebhook failed: {}", exc)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc))
+    return result
+
+
+@router.delete("/telegram/webhook", dependencies=[Depends(_verify_ipc_token)])
+async def telegram_delete_webhook() -> dict[str, Any]:
+    """Remove the Telegram webhook (revert to long-polling getUpdates)."""
+    client = TelegramBot()
+    try:
+        result = await client.delete_webhook()
+    except Exception as exc:
+        logger.error("Telegram deleteWebhook failed: {}", exc)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc))
+    return result
+
+
+@router.post("/telegram/webhook")
+async def telegram_webhook(payload: dict[str, Any]) -> dict[str, Any]:
+    """Receive an inbound Telegram update via webhook.
+
+    Public endpoint — Telegram doesn't sign webhook payloads with a shared
+    secret by default. For production, you should:
+    1. Use a long unguessable URL (e.g. /integrations/telegram/webhook/{secret_token})
+    2. Or set the `secret_token` parameter in setWebhook and verify it via
+       the X-Telegram-Bot-Api-Secret-Token header.
+    """
+    # Telegram raw payload has nested message.from/chat/text. We normalize it
+    # into TelegramUpdate via the bot's static _normalize_update method
+    # (which extracts update_id, chat_id, from_user, text from the raw payload).
+    from ..integrations.telegram import TelegramUpdate
+    client = TelegramBot()
+    try:
+        update = TelegramBot._normalize_update(payload)
+        if update.text:
+            cmd, args = client.parse_command(update.text)
+            logger.info(
+                "Telegram inbound chat={} from={} text={} cmd={} args={}",
+                update.chat_id,
+                update.from_user,
+                update.text[:50],
+                cmd,
+                args,
+            )
+        return {"ok": True, "update_id": update.update_id}
+    except Exception as exc:
+        logger.error("Telegram webhook processing failed: {}", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Discord
 # ---------------------------------------------------------------------------
@@ -250,6 +407,65 @@ async def discord_send(req: DiscordSendRequest) -> dict[str, Any]:
         logger.error("Discord send failed: {}", exc)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc))
     return result
+
+
+@router.post("/discord/webhook")
+async def discord_webhook(request: Request) -> dict[str, Any]:
+    """Discord interactions endpoint — receives slash commands and other events.
+
+    Master prompt §55: verify the Ed25519 signature on every request using
+    the bot's public key. Unverified requests get 401.
+
+    Returns:
+    - PONG (type 1) for ping/verification requests
+    - A deferred response for APPLICATION_COMMAND (type 2) interactions
+    """
+    raw_body = await request.body()
+    signature = request.headers.get("X-Signature-Ed25519")
+    timestamp = request.headers.get("X-Signature-Timestamp")
+
+    if not settings.mock_mode:
+        if not _verify_discord_signature(raw_body, signature, timestamp):
+            logger.warning("Discord interaction signature verification failed")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid request signature")
+
+    try:
+        payload: dict[str, Any] = await request.json()
+    except Exception as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid JSON: {exc}")
+
+    interaction_type = payload.get("type", 0)
+
+    # Discord interaction types
+    if interaction_type == 1:
+        # PING — Discord sends this when you register the webhook URL
+        return {"type": 1}
+    elif interaction_type == 2:
+        # APPLICATION_COMMAND — slash command invocation
+        data = payload.get("data", {})
+        cmd_name = data.get("name", "unknown")
+        cmd_options = {opt["name"]: opt["value"] for opt in data.get("options", [])}
+        logger.info("Discord slash command: {} args={}", cmd_name, cmd_options)
+
+        # Acknowledge with a deferred message (we have 15 min to follow up via
+        # the original interaction token)
+        return {
+            "type": 5,  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+            "data": {"content": f"Received command: /{cmd_name}"},
+        }
+    elif interaction_type == 3:
+        # MESSAGE_COMPONENT — button/select menu interaction
+        logger.info("Discord message component interaction: {}", payload.get("data", {}))
+        return {"type": 6}  # DEFERRED_UPDATE_MESSAGE
+    elif interaction_type == 4:
+        # APPLICATION_COMMAND_AUTOCOMPLETE
+        return {"type": 8}  # APPLICATION_COMMAND_AUTOCOMPLETE_RESULT
+    elif interaction_type == 5:
+        # MODAL_SUBMIT
+        return {"type": 4, "data": {"content": "Modal received"}}
+    else:
+        logger.warning("Discord unknown interaction type: {}", interaction_type)
+        return {"type": 4, "data": {"content": f"Unknown interaction type: {interaction_type}"}}
 
 
 __all__ = ["router"]

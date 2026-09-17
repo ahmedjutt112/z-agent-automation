@@ -1,0 +1,11 @@
+{
+  "name": "hello_world",
+  "version": "1.0.0",
+  "description": "Example plugin demonstrating the plugin manifest + entry point pattern.",
+  "author": "automation-service",
+  "permissions": ["filesystem.read"],
+  "tools": ["tools.greet"],
+  "triggers": [],
+  "ai_providers": [],
+  "settings_schema": {}
+}

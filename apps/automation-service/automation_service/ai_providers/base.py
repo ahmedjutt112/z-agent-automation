@@ -30,7 +30,7 @@ from __future__ import annotations
 import abc
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from ..models import Plan, RiskLevel
 
@@ -283,6 +283,61 @@ def _make_vercel_gateway(config: AIProviderConfig) -> AIProvider:
 _PROVIDERS["vercel_gateway"] = _make_vercel_gateway
 
 
+# ---------------------------------------------------------------------------
+# SDK-backed providers (Task 4-c) — real implementations
+# ---------------------------------------------------------------------------
+
+# Import the concrete SDK provider classes for the 11 providers with bespoke
+# HTTP APIs. The 8 OpenAI-compatible providers in the task table (ai21, jina,
+# ai2, lm_studio, meta, sambanova_cloud, nocipium, nebius) are registered below
+# via _openai_compat_factory.
+from .sdk_providers import (  # noqa: E402
+    CohereProvider,
+    VoyageProvider,
+    StabilityProvider,
+    ReplicateProvider,
+    CloudflareProvider,
+    AWSBedrockProvider,
+    GoogleVertexProvider,
+    AzureAIProvider,
+    IBMWatsonxProvider,
+    DatabricksProvider,
+)
+
+# Register the 11 custom SDK providers (overrides any placeholder that
+# _register_all_from_registry would otherwise assign).
+_PROVIDERS.update({
+    "cohere": CohereProvider,
+    "voyage": VoyageProvider,
+    "stability": StabilityProvider,
+    "replicate": ReplicateProvider,
+    "cloudflare": CloudflareProvider,
+    "aws_bedrock": AWSBedrockProvider,
+    "google_vertex": GoogleVertexProvider,
+    "azure_ai": AzureAIProvider,
+    "ibm_watsonx": IBMWatsonxProvider,
+    "databricks": DatabricksProvider,
+    # amazon_nova reuses the Bedrock runtime API (same class, different
+    # default model — the registry entry carries the right default_model).
+    "amazon_nova": AWSBedrockProvider,
+})
+
+# Register the 8 OpenAI-compatible providers from the task table that the
+# registry marks openai_compatible=False but which actually expose an
+# OpenAI-shaped /chat/completions endpoint.
+for _compat_name in (
+    "ai21",
+    "jina",
+    "ai2",
+    "lm_studio",
+    "meta",
+    "sambanova_cloud",
+    "nocipium",
+    "nebius",
+):
+    _PROVIDERS[_compat_name] = _openai_compat_factory(_compat_name)
+
+
 # Dynamically register every entry in registry.PROVIDERS that isn't already
 # in _PROVIDERS. OpenAI-compatible ones get a subclass of
 # OpenAICompatibleProvider bound to the right base_url; the rest get a
@@ -304,7 +359,7 @@ def _register_all_from_registry() -> None:
 
     for name, info in _reg.PROVIDERS.items():
         if name in _PROVIDERS:
-            continue
+            continue  # Already explicitly registered above (real SDK class).
         if info.get("openai_compatible"):
             _PROVIDERS[name] = _openai_compat_factory(name)
         else:
@@ -384,6 +439,79 @@ def list_providers() -> list[str]:
     return list(_PROVIDERS.keys())
 
 
+# ---------------------------------------------------------------------------
+# High-level chat completion helper (Task 4-c)
+# ---------------------------------------------------------------------------
+
+
+def _lookup_registry_info(provider_name: str) -> Optional[dict]:
+    """Look up the registry info dict for ``provider_name`` (or None)."""
+    try:
+        import sys
+        from pathlib import Path
+
+        automation_root = str(Path(__file__).resolve().parents[3])
+        if automation_root not in sys.path:
+            sys.path.insert(0, automation_root)
+        from ai_providers import registry as _reg  # type: ignore
+        return _reg.PROVIDERS.get(provider_name)
+    except Exception:
+        return None
+
+
+def _is_mock_mode() -> bool:
+    """True when AUTOMATION_MOCK_MODE is set (env-level check so the helper
+    works whether imported by the automation-service or the zai CLI)."""
+    return os.environ.get("AUTOMATION_MOCK_MODE", "true").lower() == "true"
+
+
+async def chat_completion(
+    provider_name: str,
+    messages: list[dict[str, str]],
+    **kwargs: Any,
+) -> str:
+    """Route a chat-completion request to a provider by name.
+
+    Resolution order:
+      1. Validate ``provider_name`` (raise ``ValueError`` if unknown).
+      2. If ``AUTOMATION_MOCK_MODE=true`` (default), return a deterministic
+         mock string immediately — no HTTP, no credentials needed.
+      3. Otherwise, look up the provider via :func:`get_provider_from_credentials`.
+         If no credential is found, raise ``RuntimeError`` with a helpful
+         message naming the env var to set.
+      4. Call ``provider.complete(messages, **kwargs)`` and return its result.
+    """
+    # 1. Validate provider name (unknown -> ValueError).
+    info = _lookup_registry_info(provider_name)
+    if info is None and provider_name not in _PROVIDERS:
+        raise ValueError(
+            f"Unknown AI provider: {provider_name!r}. "
+            f"Available: {sorted(_PROVIDERS.keys())[:20]}... "
+            f"(see ai_providers.registry.PROVIDERS for the full list)"
+        )
+
+    # 2. Mock-mode short-circuit (so tests / dev work without network or creds).
+    if _is_mock_mode():
+        return f"[mock-mode chat response from {provider_name}]"
+
+    # 3. Real path: build the provider via the credential manager.
+    provider = get_provider_from_credentials(provider_name)
+    if provider is None:
+        env_key = (info or {}).get("env_key") or "(local provider)"
+        if env_key == "(local provider)":
+            env_var_hint = "no env var required (local provider)"
+        else:
+            env_var_hint = env_key.upper().replace("-", "_").replace(".", "_")
+        raise RuntimeError(
+            f"No credentials found for provider {provider_name!r}. "
+            f"Set the {env_var_hint} environment variable "
+            f"(or store in OS keyring under service='z-agent', username='{env_key}')."
+        )
+
+    # 4. Dispatch.
+    return await provider.complete(messages, **kwargs)
+
+
 __all__ = [
     "AIProvider",
     "AIProviderConfig",
@@ -392,7 +520,18 @@ __all__ = [
     "GeminiProvider",
     "OllamaProvider",
     "CustomProvider",
+    "CohereProvider",
+    "VoyageProvider",
+    "StabilityProvider",
+    "ReplicateProvider",
+    "CloudflareProvider",
+    "AWSBedrockProvider",
+    "GoogleVertexProvider",
+    "AzureAIProvider",
+    "IBMWatsonxProvider",
+    "DatabricksProvider",
     "get_provider",
     "get_provider_from_credentials",
     "list_providers",
+    "chat_completion",
 ]

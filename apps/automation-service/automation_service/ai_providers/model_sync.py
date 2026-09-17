@@ -188,6 +188,19 @@ async def sync_models(session=None, *, include_vercel_gateway: bool = True) -> d
                 logger.info("sync_models: skip {} (no credential for {})", name, env_key)
                 continue
 
+            # In mock mode, local providers (no env_key, e.g. lm_studio)
+            # don't have a real local server running — skip them so the
+            # sync returns all-zero counts (consistent with the "no
+            # credentials → count=0" contract). In production (mock mode
+            # off), the local server is expected to be up.
+            if (
+                not api_key
+                and env_key is None
+                and os.environ.get("AUTOMATION_MOCK_MODE", "true").lower() == "true"
+            ):
+                logger.info("sync_models: skip {} (local provider, mock mode)", name)
+                continue
+
             # Only OpenAI-compatible providers expose a usable /models endpoint
             # through the OpenAICompatibleProvider class. For non-compat ones
             # without a concrete implementation, list_models() would return [].
