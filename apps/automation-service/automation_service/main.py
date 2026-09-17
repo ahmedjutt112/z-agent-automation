@@ -29,6 +29,8 @@ from .engine.workflow_executor import WorkflowExecutor
 from .engine.tool_registry import tool_registry
 from .security.permission_engine import permission_engine
 from .security.kill_switch import kill_switch
+from .api.oauth_routes import router as oauth_router
+from .api.integration_routes import router as integration_router
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +56,16 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url=None,
+    openapi_tags=[
+        {"name": "health", "description": "Service health & status."},
+        {"name": "tools", "description": "List available automation tools."},
+        {"name": "planning", "description": "AI planning & plan execution."},
+        {"name": "workflow", "description": "Workflow CRUD."},
+        {"name": "automation", "description": "Mouse/keyboard/screen/file/app/browser primitives."},
+        {"name": "kill-switch", "description": "Emergency stop / reset."},
+        {"name": "oauth", "description": "OAuth provider integrations (Google, GitHub, Facebook)."},
+        {"name": "integrations", "description": "Messaging integrations (Email, WhatsApp, Telegram, Discord)."},
+    ],
 )
 
 # Lock CORS to localhost — Electron loads renderer from app:// or http://localhost
@@ -296,3 +308,11 @@ async def unhandled_exc(request, exc: Exception) -> JSONResponse:
         status_code=500,
         content={"error": str(exc), "type": type(exc).__name__},
     )
+
+
+# ---------------------------------------------------------------------------
+# OAuth + Integrations routers (master prompt §54)
+# ---------------------------------------------------------------------------
+
+app.include_router(oauth_router, prefix="/oauth", tags=["oauth"])
+app.include_router(integration_router, prefix="/integrations", tags=["integrations"])

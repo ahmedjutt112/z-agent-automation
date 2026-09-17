@@ -11,6 +11,7 @@ import { Workflows } from "./pages/Workflows";
 import { Tasks } from "./pages/Tasks";
 import { Logs } from "./pages/Logs";
 import { Settings } from "./pages/Settings";
+import { Integrations } from "./pages/Integrations";
 import { EmergencyBanner } from "./components/EmergencyBanner";
 import { useStore } from "./store";
 
@@ -58,6 +59,7 @@ function renderView(view: string): React.ReactNode {
     case "workflows": return <Workflows />;
     case "tasks": return <Tasks />;
     case "logs": return <Logs />;
+    case "integrations": return <Integrations />;
     case "settings": return <Settings />;
     default: return <Dashboard />;
   }

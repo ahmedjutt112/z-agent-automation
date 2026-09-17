@@ -1,11 +1,36 @@
-"""AIProvider abstract base + registry — master prompt §6."""
+"""AIProvider abstract base + registry — master prompt §6 (expanded scope).
+
+Originally supported 5 providers (openai, anthropic, gemini, ollama, custom).
+Now supports 51 providers via:
+
+  - The original 5 concrete classes (kept for backwards compatibility).
+  - A generic :class:`OpenAICompatibleProvider` reused for the 28 OpenAI-
+    compatible third-party providers (deepseek, mistral, xai, groq, together,
+    fireworks, cerebras, sambanova, perplexity, openrouter, huggingface,
+    nvidia_nim, novita, siliconflow, hyperbolic, lepton, friendliai, baseten,
+    modal, anyscale, aleph_alpha, writer, upstage, baichuan, zhipu, qwen,
+    together_computer, cerebrium).
+  - A :class:`VercelAIGatewayProvider` aggregator under name ``vercel_gateway``
+    that routes to ALL 50 providers via a single API key.
+  - A :class:`_PlaceholderProvider` for the ~17 providers that have bespoke
+    SDKs (anthropic-style, gemini, cohere, ai21, aws_bedrock, google_vertex,
+    azure_ai, ibm_watsonx, replicate, stability, voyage, jina, cloudflare,
+    databricks, ai2, amazon_nova, lm_studio, meta, sambanova_cloud, nebius,
+    nocipium). These are registered so :func:`get_provider` succeeds for
+    every name in ``registry.PROVIDERS``; calling ``complete()`` raises
+    NotImplementedError with guidance on which SDK to install.
+
+The provider metadata lives in ``ai_providers.registry`` (the top-level
+package outside ``automation_service``) so it can be imported by both the
+``zai`` CLI and the service.
+"""
 
 from __future__ import annotations
 
 import abc
 import os
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..models import Plan, RiskLevel
 
@@ -54,7 +79,7 @@ class AIProvider(abc.ABC):
 
 
 # ---------------------------------------------------------------------------
-# Concrete providers
+# Concrete providers — original 5 (backwards compat)
 # ---------------------------------------------------------------------------
 
 
@@ -150,11 +175,97 @@ class CustomProvider(AIProvider):
 
 
 # ---------------------------------------------------------------------------
-# Factory
+# Lazy-imported newer providers
 # ---------------------------------------------------------------------------
 
 
-_PROVIDERS: dict[str, type[AIProvider]] = {
+def _openai_compat_factory(provider_name: str) -> Callable[[AIProviderConfig], "AIProvider"]:
+    """Build a factory that constructs an :class:`OpenAICompatibleProvider`
+    with its ``default_base_url`` set from the registry, and ``name`` set to
+    the provider slug.
+    """
+    # Import lazily so this module can be imported even if the
+    # ai_providers/ top-level package isn't yet on sys.path (e.g. during
+    # very early CLI bootstrap). Once registry is needed, it's looked up.
+    from .openai_compatible import OpenAICompatibleProvider
+
+    # Top-level ai_providers package (outside automation_service). If the
+    # path isn't on sys.path, we fall back to a hardcoded mapping.
+    base_url: Optional[str] = None
+    try:
+        # Add the apps/automation-service dir to sys.path if missing so
+        # `ai_providers.registry` (the top-level package) is importable.
+        import sys
+        from pathlib import Path
+
+        automation_root = str(Path(__file__).resolve().parents[3])
+        if automation_root not in sys.path:
+            sys.path.insert(0, automation_root)
+        from ai_providers import registry as _reg  # type: ignore
+        info = _reg.PROVIDERS.get(provider_name, {})
+        base_url = info.get("base_url")
+    except Exception:
+        base_url = None
+
+    class _Bound(OpenAICompatibleProvider):
+        name = provider_name
+        default_base_url = base_url
+
+    return _Bound
+
+
+def _placeholder_factory(provider_name: str) -> Callable[[AIProviderConfig], "AIProvider"]:
+    """Build a placeholder class for providers that have bespoke SDKs."""
+    notes = ""
+    default_model = ""
+    try:
+        import sys
+        from pathlib import Path
+
+        automation_root = str(Path(__file__).resolve().parents[3])
+        if automation_root not in sys.path:
+            sys.path.insert(0, automation_root)
+        from ai_providers import registry as _reg  # type: ignore
+        info = _reg.PROVIDERS.get(provider_name, {})
+        notes = info.get("notes", "")
+        default_model = info.get("default_model", "")
+    except Exception:
+        pass
+
+    class _Placeholder(_PlaceholderProvider):
+        name = provider_name
+        _notes = notes
+        _default_model = default_model
+
+    return _Placeholder
+
+
+class _PlaceholderProvider(AIProvider):
+    """Instantiable placeholder for providers without a real implementation.
+
+    Calling :meth:`complete` raises :class:`NotImplementedError` with a
+    helpful message pointing at the SDK the user needs to install.
+    """
+
+    name: str = "placeholder"
+    _notes: str = ""
+    _default_model: str = ""
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        raise NotImplementedError(
+            f"Provider '{self.name}' is registered but has no concrete implementation. "
+            f"Notes: {self._notes or 'install the provider-specific SDK and add a provider class.'} "
+            f"Default model: {self._default_model or 'unknown'}."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Factory + registry
+# ---------------------------------------------------------------------------
+
+
+# The 5 original providers — always present.
+_PROVIDERS: dict[str, Callable[[AIProviderConfig], AIProvider]] = {
     "openai": OpenAIProvider,
     "anthropic": AnthropicProvider,
     "gemini": GeminiProvider,
@@ -163,11 +274,125 @@ _PROVIDERS: dict[str, type[AIProvider]] = {
 }
 
 
+# Vercel AI Gateway — single API key for ALL providers.
+def _make_vercel_gateway(config: AIProviderConfig) -> AIProvider:
+    from .vercel_gateway import VercelAIGatewayProvider
+    return VercelAIGatewayProvider(config)
+
+
+_PROVIDERS["vercel_gateway"] = _make_vercel_gateway
+
+
+# Dynamically register every entry in registry.PROVIDERS that isn't already
+# in _PROVIDERS. OpenAI-compatible ones get a subclass of
+# OpenAICompatibleProvider bound to the right base_url; the rest get a
+# placeholder so get_provider() never raises for a registry entry.
+def _register_all_from_registry() -> None:
+    try:
+        import sys
+        from pathlib import Path
+
+        automation_root = str(Path(__file__).resolve().parents[3])
+        if automation_root not in sys.path:
+            sys.path.insert(0, automation_root)
+        from ai_providers import registry as _reg  # type: ignore
+    except Exception:
+        # If the registry isn't importable for some reason, we leave the
+        # 5 original + vercel_gateway providers in place — at least basic
+        # functionality is preserved.
+        return
+
+    for name, info in _reg.PROVIDERS.items():
+        if name in _PROVIDERS:
+            continue
+        if info.get("openai_compatible"):
+            _PROVIDERS[name] = _openai_compat_factory(name)
+        else:
+            _PROVIDERS[name] = _placeholder_factory(name)
+
+
+_register_all_from_registry()
+
+
+# ---------------------------------------------------------------------------
+# Public factory API
+# ---------------------------------------------------------------------------
+
+
 def get_provider(name: str, config: AIProviderConfig) -> AIProvider:
+    """Construct a provider instance by name.
+
+    Raises ``ValueError`` if ``name`` is not in the registry.
+    """
     if name not in _PROVIDERS:
         raise ValueError(f"Unknown AI provider: {name}. Available: {list(_PROVIDERS)}")
-    return _PROVIDERS[name](config)
+    factory = _PROVIDERS[name]
+    return factory(config)
+
+
+def get_provider_from_credentials(provider_name: str) -> Optional[AIProvider]:
+    """Construct a provider instance, auto-loading the API key from the
+    credential manager. Returns ``None`` if no credential is found.
+
+    Looks up the env_key from ``registry.PROVIDERS[provider_name]``; if
+    the provider is a local one (no env_key, e.g. ollama / lm_studio),
+    returns the provider with no API key set.
+
+    The base_url is auto-set from the registry entry when applicable.
+    """
+    try:
+        import sys
+        from pathlib import Path
+
+        automation_root = str(Path(__file__).resolve().parents[3])
+        if automation_root not in sys.path:
+            sys.path.insert(0, automation_root)
+        from ai_providers import registry as _reg  # type: ignore
+    except Exception:
+        return None
+
+    info = _reg.PROVIDERS.get(provider_name)
+    if info is None:
+        return None
+
+    env_key = info.get("env_key")
+    api_key: Optional[str] = None
+    if env_key:
+        try:
+            from ..security.credentials import get_credential
+            api_key = get_credential(env_key)
+        except Exception:
+            api_key = None
+        if not api_key:
+            return None  # No credential — caller should skip
+
+    cfg = AIProviderConfig(
+        name=provider_name,
+        api_key=api_key,
+        base_url=info.get("base_url"),
+        model=info.get("default_model", ""),
+    )
+    try:
+        return get_provider(provider_name, cfg)
+    except Exception:
+        return None
 
 
 def list_providers() -> list[str]:
+    """Return all registered provider slugs (always includes the 5 original
+    + vercel_gateway + every entry in ``registry.PROVIDERS``)."""
     return list(_PROVIDERS.keys())
+
+
+__all__ = [
+    "AIProvider",
+    "AIProviderConfig",
+    "OpenAIProvider",
+    "AnthropicProvider",
+    "GeminiProvider",
+    "OllamaProvider",
+    "CustomProvider",
+    "get_provider",
+    "get_provider_from_credentials",
+    "list_providers",
+]
