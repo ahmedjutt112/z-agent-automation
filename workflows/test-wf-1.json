@@ -1,0 +1,30 @@
+{
+  "id": "test-wf-1",
+  "name": "Test Workflow",
+  "version": 1,
+  "description": null,
+  "trigger": {
+    "type": "manual",
+    "cron": null,
+    "file_pattern": null,
+    "hotkey": null,
+    "webhook_url": null,
+    "timezone": "UTC"
+  },
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "screen.capture",
+      "args": {},
+      "next": null,
+      "on_error": null,
+      "timeout_ms": 30000,
+      "retry_count": 0,
+      "retry_delay_ms": 1000
+    }
+  ],
+  "variables": {},
+  "enabled": true,
+  "created_at": "2026-09-17T14:41:53.540509Z",
+  "updated_at": "2026-09-17T14:41:53.540514Z"
+}
