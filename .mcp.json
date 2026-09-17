@@ -1,0 +1,40 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/z/my-project"
+      ],
+      "description": "Read/write access to the project workspace"
+    },
+    "sqlite": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "mcp-server-sqlite",
+        "mcp-server-sqlite",
+        "--db-path",
+        "/home/z/my-project/db/custom.db"
+      ],
+      "description": "Query and modify the project SQLite database"
+    },
+    "web-search": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "mcp-server-fetch",
+        "mcp-server-fetch"
+      ],
+      "description": "Fetch arbitrary URLs and extract markdown — for web research"
+    },
+    "project-tools": {
+      "command": "python",
+      "args": [
+        "/home/z/my-project/mcp/server.py"
+      ],
+      "description": "Custom project-scoped MCP server (z-agent runtime tools)"
+    }
+  }
+}
