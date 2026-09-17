@@ -18,6 +18,9 @@ import { spawn, ChildProcess } from "node:child_process";
 import * as path from "node:path";
 import * as fs from "node:fs";
 
+// System tray — master prompt section 47
+import { setupTray, destroyTray, setTrayState, refreshTrayMenu } from "./tray";
+
 let automationProc: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
 
@@ -149,6 +152,21 @@ ipcMain.handle("automation:emergency-stop", async (): Promise<{ engaged: boolean
 });
 
 // ---------------------------------------------------------------------------
+// Tray state sync — renderer pushes state changes from the WebSocket
+// event stream (TASK_STARTED -> running, TASK_PAUSED -> paused, etc.).
+// ---------------------------------------------------------------------------
+
+ipcMain.handle("tray:set-state", async (_evt, state: "idle" | "running" | "paused" | "error") => {
+  setTrayState(state, mainWindow);
+  return { ok: true, state };
+});
+
+ipcMain.handle("tray:refresh", async () => {
+  await refreshTrayMenu(mainWindow);
+  return { ok: true };
+});
+
+// ---------------------------------------------------------------------------
 // App lifecycle
 // ---------------------------------------------------------------------------
 
@@ -166,12 +184,21 @@ app.whenReady().then(() => {
   automationProc = spawnAutomationService();
   createWindow();
 
+  // System tray — master prompt section 47. Must be set up AFTER the
+  // window is created because the tray menu items toggle the window.
+  setupTray(mainWindow);
+
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
 app.on("window-all-closed", () => {
+  // Hide the tray when all windows close (don't quit unless the user
+  // explicitly clicked Exit in the tray menu). On macOS this is the
+  // conventional behavior; on Linux/Windows we mirror it so the tray
+  // remains the primary control surface.
+  destroyTray();
   if (automationProc) {
     automationProc.kill("SIGTERM");
     automationProc = null;
@@ -180,6 +207,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  destroyTray();
   if (automationProc) {
     automationProc.kill("SIGTERM");
     automationProc = null;

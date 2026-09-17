@@ -31,8 +31,13 @@ from .security.permission_engine import permission_engine
 from .security.kill_switch import kill_switch
 from .api.oauth_routes import router as oauth_router
 from .api.integration_routes import router as integration_router
+from .api.workflow_routes import router as workflow_router
+from .api.system_routes import router as system_router
 from .scheduler.manager import scheduler_manager
 from .scheduler.api import router as schedules_router
+from .voice.api import router as voice_router
+from .memory.api import router as memory_router
+from .profiles.api import router as profiles_router
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +75,10 @@ app = FastAPI(
         {"name": "oauth", "description": "OAuth provider integrations (Google, GitHub, Facebook)."},
         {"name": "integrations", "description": "Messaging integrations (Email, WhatsApp, Telegram, Discord)."},
         {"name": "scheduler", "description": "Schedule workflows via cron, file events, hotkeys, webhooks, system events."},
+        {"name": "voice", "description": "Voice control pipeline — STT, TTS, wake word, listen-and-plan (never bypasses security confirmation)."},
+        {"name": "system", "description": "System tray state, auto-update (section 90), backup/restore (section 91)."},
+        {"name": "memory", "description": "Long-term AI memory (section 84) — preferences, workflow, application, task context, temporary."},
+        {"name": "profiles", "description": "Multi-profile support (section 49) — personal/work/dev/test sandboxes."},
     ],
 )
 
@@ -333,3 +342,8 @@ async def unhandled_exc(request, exc: Exception) -> JSONResponse:
 app.include_router(oauth_router, prefix="/oauth", tags=["oauth"])
 app.include_router(integration_router, prefix="/integrations", tags=["integrations"])
 app.include_router(schedules_router, prefix="/schedules", tags=["scheduler"])
+app.include_router(workflow_router, prefix="/workflow", tags=["workflow"])
+app.include_router(voice_router, prefix="/voice", tags=["voice"])
+app.include_router(system_router, prefix="/system", tags=["system"])
+app.include_router(memory_router, prefix="/memory", tags=["memory"])
+app.include_router(profiles_router, prefix="/profiles", tags=["profiles"])

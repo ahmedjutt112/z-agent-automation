@@ -22,6 +22,7 @@ const SECONDARY_ITEMS: { id: ViewId; label: string }[] = [
   { id: "ai-models", label: "AI Models" },
   { id: "integrations", label: "Integrations" },
   { id: "permissions", label: "Permissions" },
+  { id: "voice-settings", label: "Voice" },
   { id: "settings", label: "Settings" },
 ];
 

@@ -61,6 +61,39 @@ class DeviceProfile(Base):
 
 
 # ---------------------------------------------------------------------------
+# AI Memory — master prompt section 84
+# ---------------------------------------------------------------------------
+
+
+class Memory(Base):
+    """Master prompt section 84 — long-term AI memory.
+
+    Five memory types stored in ``memory_type``:
+    - ``user_preferences``  (persists forever)
+    - ``workflow``          (tied to a workflow_id)
+    - ``application``       (per-app behavioral facts)
+    - ``task_context``      (tied to a task_id)
+    - ``temporary``         (expires after expires_at)
+
+    CRITICAL (section 57): the MemoryManager refuses to remember values that
+    look like secrets; the credentials table is the only place secrets live.
+    """
+
+    __tablename__ = "memories"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    memory_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    key: Mapped[str] = mapped_column(String(255), nullable=False)
+    value: Mapped[Optional[dict]] = mapped_column(JSON)  # stored as JSON
+    source: Mapped[str] = mapped_column(String(64), default="system")
+    workflow_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
+    task_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, index=True)
+
+
+# ---------------------------------------------------------------------------
 # Settings & AI
 # ---------------------------------------------------------------------------
 

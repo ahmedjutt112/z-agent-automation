@@ -5,6 +5,8 @@
 import React, { useEffect } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { CommandPalette } from "./components/CommandPalette";
+import { VoiceButton } from "./components/VoiceButton";
+import { DevPanel } from "./components/DevPanel";
 import { Dashboard } from "./pages/Dashboard";
 import { AIAgent } from "./pages/AIAgent";
 import { Workflows } from "./pages/Workflows";
@@ -12,6 +14,7 @@ import { Tasks } from "./pages/Tasks";
 import { Logs } from "./pages/Logs";
 import { Settings } from "./pages/Settings";
 import { Integrations } from "./pages/Integrations";
+import { VoiceSettings } from "./pages/VoiceSettings";
 import { EmergencyBanner } from "./components/EmergencyBanner";
 import { useStore } from "./store";
 
@@ -48,6 +51,10 @@ export default function App() {
         </div>
       </main>
       <CommandPalette />
+      {/* Floating voice control button — section 46. Always visible bottom-right. */}
+      <VoiceButton />
+      {/* Developer panel — section 73. Hidden unless developer_mode=true. */}
+      <DevPanel />
     </div>
   );
 }
@@ -60,6 +67,7 @@ function renderView(view: string): React.ReactNode {
     case "tasks": return <Tasks />;
     case "logs": return <Logs />;
     case "integrations": return <Integrations />;
+    case "voice-settings": return <VoiceSettings />;
     case "settings": return <Settings />;
     default: return <Dashboard />;
   }
