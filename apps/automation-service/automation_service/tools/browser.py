@@ -21,33 +21,133 @@ from ..config import settings
 
 
 class BrowserSessionManager:
-    """Lazy-initialize Playwright. Each session has its own context for isolation."""
+    """Lazy-initialize Playwright. Each session has its own context for isolation.
+
+    Master prompt §49 (multi-profile support) — sessions are keyed by
+    ``(profile_id, session_id)`` so two profiles can each have a session
+    with the same ``session_id`` without colliding. When ``profile_id`` is
+    ``None`` we use the sentinel ``_GLOBAL_PROFILE`` so existing callers
+    that don't pass a profile keep working unchanged.
+    """
+
+    # Sentinel substituted for None profile_ids (mirrors permission_engine).
+    _GLOBAL_PROFILE = "_global"
 
     def __init__(self) -> None:
         self._playwright = None
-        self._browsers: dict[str, Any] = {}
+        # Keys are (profile_key, session_id) tuples so the same session_id
+        # can exist independently under different profiles.
+        self._browsers: dict[tuple[str, str], Any] = {}
 
-    async def get_or_create(self, session_id: str, browser: str = "chromium"):
+    @classmethod
+    def _profile_key(cls, profile_id: Optional[str]) -> str:
+        return profile_id if profile_id is not None else cls._GLOBAL_PROFILE
+
+    async def get_or_create(
+        self,
+        session_id: str,
+        browser: str = "chromium",
+        profile_id: Optional[str] = None,
+    ):
+        """Get an existing browser for ``session_id`` (under ``profile_id``)
+        or launch a fresh one.
+
+        Records the BrowserSession row in the DB (best-effort) when a new
+        session is created, including the ``profile_id`` so profile-scoped
+        queries against ``browser_sessions`` work.
+        """
         if settings.mock_mode:
             return None  # tools handle mock case
         if self._playwright is None:
             from playwright.async_api import async_playwright  # type: ignore
             self._playwright = await async_playwright().start()
-        if session_id not in self._browsers:
-            launcher = getattr(self._playwright, browser)
-            self._browsers[session_id] = await launcher.launch(headless=False)
-        return self._browsers[session_id]
 
-    async def close_all(self) -> None:
-        for b in self._browsers.values():
+        profile_key = self._profile_key(profile_id)
+        key = (profile_key, session_id)
+        if key not in self._browsers:
+            launcher = getattr(self._playwright, browser)
+            self._browsers[key] = await launcher.launch(headless=False)
+            # Best-effort DB row so profile-scoped queries have data.
             try:
-                await b.close()
+                self._record_session_row(session_id, browser, profile_id)
+            except Exception:
+                pass  # DB might be unavailable in mock mode — never block launch
+        return self._browsers[key]
+
+    async def close_all(self, profile_id: Optional[str] = None) -> None:
+        """Close browser sessions.
+
+        If ``profile_id`` is provided, only sessions for that profile are
+        closed (and the global sessions, by default — pass an explicit
+        ``profile_id`` to scope). If ``profile_id`` is ``None`` (default),
+        every session is closed (existing behaviour).
+        """
+        if profile_id is None:
+            # Close everything (original behaviour).
+            for b in self._browsers.values():
+                try:
+                    await b.close()
+                except Exception:
+                    pass
+            self._browsers.clear()
+            if self._playwright:
+                await self._playwright.stop()
+                self._playwright = None
+            return
+
+        # Profile-scoped close — only close sessions under that profile key.
+        profile_key = self._profile_key(profile_id)
+        to_close = [k for k in self._browsers if k[0] == profile_key]
+        for k in to_close:
+            try:
+                await self._browsers[k].close()
             except Exception:
                 pass
-        self._browsers.clear()
-        if self._playwright:
+            del self._browsers[k]
+        # If no sessions remain, shut down the playwright instance too.
+        if not self._browsers and self._playwright:
             await self._playwright.stop()
             self._playwright = None
+
+    # ------------------------------------------------------------------
+    # DB row recording (best-effort; mock mode skips)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _record_session_row(session_id: str, browser: str, profile_id: Optional[str]) -> None:
+        """Insert a BrowserSession row if a DB is available.
+
+        Failure here is non-fatal — the in-memory ``_browsers`` dict is
+        the source of truth for active sessions; the DB row exists only so
+        profile-scoped queries have something to return.
+        """
+        try:
+            from database.base import SessionLocal
+            from database.models.schema import BrowserSession
+        except ImportError:
+            return
+        try:
+            with SessionLocal() as session:
+                existing = (
+                    session.query(BrowserSession)
+                    .filter(BrowserSession.session_id == session_id)
+                    .filter(BrowserSession.profile_id == (profile_id if profile_id else None))
+                    .first()
+                )
+                if existing is not None:
+                    return
+                row = BrowserSession(
+                    session_id=session_id,
+                    profile_id=profile_id,
+                    browser_type=browser,
+                    is_persistent=False,
+                    metadata_json={},
+                )
+                session.add(row)
+                session.commit()
+        except Exception:
+            # Swallow — DB might not exist in mock mode.
+            pass
 
 
 browser_sessions = BrowserSessionManager()

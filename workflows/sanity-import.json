@@ -1,0 +1,57 @@
+{
+  "id": "sanity-import",
+  "name": "Sanity",
+  "version": 1,
+  "description": null,
+  "trigger": {
+    "type": "manual",
+    "cron": null,
+    "file_pattern": null,
+    "hotkey": null,
+    "webhook_url": null,
+    "timezone": "UTC"
+  },
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "args": {},
+      "next": "n1",
+      "on_error": null,
+      "timeout_ms": 30000,
+      "retry_count": 0,
+      "retry_delay_ms": 1000
+    },
+    {
+      "id": "n1",
+      "type": "browser.navigate",
+      "args": {
+        "url": "https://example.com"
+      },
+      "next": "end",
+      "on_error": null,
+      "timeout_ms": 30000,
+      "retry_count": 0,
+      "retry_delay_ms": 1000
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "args": {},
+      "next": null,
+      "on_error": null,
+      "timeout_ms": 30000,
+      "retry_count": 0,
+      "retry_delay_ms": 1000
+    }
+  ],
+  "variables": {},
+  "enabled": false,
+  "profile_id": null,
+  "created_at": "2026-09-18T06:26:07.112813Z",
+  "updated_at": "2026-09-18T06:26:07.112828Z",
+  "permissions_required": [
+    "browser.navigate"
+  ],
+  "risk_level": "medium"
+}

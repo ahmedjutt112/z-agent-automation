@@ -21,8 +21,10 @@ import {
 export type ViewId =
   | "dashboard"
   | "ai-agent"
+  | "assistant"
   | "tasks"
   | "workflows"
+  | "marketplace"
   | "recorder"
   | "browser"
   | "files"

@@ -1178,3 +1178,303 @@ Stage Summary:
   * Template marketplace (§52) — Phase 5 feature
   * Phase 5: Advanced AI OS Assistant (§83) — "Prepare everything for my 9 AM meeting"
 - **Verification status**: ALL PASSED. Environment is feature-complete for MVP + Phase 2 + most of Phase 3 + 4.
+
+---
+
+Task ID: 7-a
+Agent: integration-cleanup-writer
+Task: Wire 3 missing integration pieces — profile_id filtering across workflow_routes/permission_engine/browser_sessions, /logs/stream WebSocket + /logs/recent + /logs/export endpoints, /screenshots list/get/metadata/delete/ocr endpoints. Update DevPanel + api.ts. Add tests.
+
+Work Log:
+- Read worklog.md + AGENTS.md; identified session-6 "still TODO" list (lines 1172-1178) naming these 3 integrations explicitly.
+- Read schema.py, workflow_routes.py, permission_engine.py, browser.py, main.py, config.py, event_bus.py, DevPanel.tsx, api.ts, credentials.py, screen.py, workflow_executor.py, existing tests (test_workflow_routes.py, test_permission_engine.py, test_api_endpoints.py, test_database_models.py, conftest.py) to understand patterns and constraints.
+- A. Edited database/models/schema.py to add `profile_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("device_profiles.id"), index=True, default=None)` to 9 models: Workflow, Permission, WorkflowRun, Task, Screenshot, BrowserSession, ScheduledJob, Trigger, AutomationHistory. All 7 existing database unit tests still pass.
+- Added `profile_id: Optional[str] = None` field to the Workflow pydantic model in models.py so it round-trips through POST/GET /workflow without breaking existing tests (the field is optional, defaulting to None).
+- B1. Edited workflow_routes.py: added _check_profile_access(workflow, profile_id) helper (403 if both set and differ). Updated GET /workflow/{id}, PUT /workflow/{id}, DELETE /workflow/{id}, POST /workflow/{id}/duplicate, GET /workflow/{id}/versions, POST /workflow/{id}/run to accept ?profile_id= query param and run the access check. PUT preserves profile_id (cannot be changed via update); POST /run tags the resulting WorkflowRun with effective_profile_id. Edited main.py POST/GET /workflow to accept profile_id in the body / query and filter the list endpoint.
+- B2. Rewrote permission_engine.py: _grants key changed from (tool_name, risk_level) to (profile_id or "_global", tool_name, risk_level). Added _GLOBAL_PROFILE sentinel. evaluate_action / evaluate_plan / grant / revoke / list_grants all accept optional profile_id (backwards compat: None means _global). Added list_grants_for_profile(profile_id) returning both profile-specific and global grants. evaluate_action checks profile-specific grant first, then falls back to _global.
+- B3. Edited browser.py BrowserSessionManager: _browsers dict key changed from session_id to (profile_key, session_id) tuple where profile_key uses _GLOBAL_PROFILE sentinel for None. get_or_create now accepts profile_id=None param. close_all(profile_id=None) — if profile_id is set, only closes sessions for that profile; if None, closes everything (original behaviour). Added best-effort _record_session_row helper that inserts a BrowserSession DB row when a new session is launched, including profile_id.
+- C. Created api/logs_routes.py: WebSocket /logs/stream (accepts level/tool/task_id/token query params; on connect pushes backfill of last 50 matching entries; tails settings.log_file if it exists, otherwise falls back to streaming synthetic entries from the event_bus subscription); GET /logs/recent (returns filtered entries from log file or event-bus ring buffer); GET /logs/export (json|csv|txt formats with Content-Disposition attachment header — §38 export diagnostics). Every entry is run through credentials.mask() before being sent — but only the `message` and `tool` fields are masked (infrastructure fields like level/logger/timestamp/task_id are left alone so client-side filters keep working).
+- D. Created api/screenshots_routes.py: GET /screenshots (queries DB first, falls back to scanning settings.screenshots_dir for *.png files when no DB rows exist); GET /screenshots/recent (shortcut for limit=10, declared BEFORE /{screenshot_id} so FastAPI doesn't capture "recent" as the id); GET /screenshots/{id} (FileResponse with Content-Type: image/png); GET /screenshots/{id}/metadata; DELETE /screenshots/{id} (removes file + DB row); POST /screenshots/{id}/ocr (delegates to the existing screen.ocr tool from the registry, returns text + bounding_boxes). All require IPC bearer token.
+- Edited main.py: imported logs_router and screenshots_router; added /logs and /screenshots prefixes via app.include_router; added "logs" and "screenshots" entries to openapi_tags.
+- E. Rewrote DevPanel.tsx: the existing /events WebSocket subscription stays (still feeds Tool Calls / Events / Selectors / Timing tabs). Added a new WebSocket connection to ws://127.0.0.1:8765/logs/stream?level=DEBUG on mount that populates the Debug Logs tab and auto-scrolls to bottom on new entries. Added a 5-second polling effect that hits GET /screenshots?limit=20 to populate the Screenshots tab thumbnails. Clicking a thumbnail switches to the OCR Boxes tab and triggers POST /screenshots/{id}/ocr — the resulting bounding boxes are overlaid on the screenshot image as absolutely-positioned div rectangles with text labels. Tool Calls tab now shows a target column (selector / target from the event payload). Timing tab unchanged (aggregates tool calls by name).
+- F. Edited api.ts: added LogEntry, ScreenshotMetadata, OCRBoundingBox, OCRResult TypeScript interfaces; added api.logs.recent / api.logs.exportLogs / api.screenshots.list / api.screenshots.get / api.screenshots.metadata / api.screenshots.delete / api.screenshots.ocr methods. The get() method returns Promise<Blob> (raw PNG bytes); exportLogs() also returns Promise<Blob> for download.
+- G. Created tests/test_integration_cleanup.py with 15 tests covering all required behaviours: test_workflow_list_filters_by_profile, test_workflow_get_403_when_profile_mismatch, test_permission_engine_profile_grant, test_permission_engine_global_grant_applies_to_all_profiles, test_browser_session_manager_profile_isolation, test_logs_recent, test_logs_recent_with_level_filter, test_logs_export_json, test_logs_export_csv, test_screenshots_list, test_screenshots_get_404_for_nonexistent, test_screenshots_ocr_nonexistent, test_screenshots_filesystem_fallback, test_screenshots_get_returns_png, test_screenshots_ocr_on_existing. The extra 3 tests beyond the 12 required cover the filesystem-fallback, PNG-bytes return, and mock-OCR happy paths.
+- Initial run uncovered a regression: _mask_entry was masking the level/logger fields too, breaking the level-filter assertion in test_logs_recent_with_level_filter. Fixed by limiting masking to message + tool fields (level/logger/timestamp/task_id are infrastructure metadata that the client needs intact for filtering).
+- Ran the new test file (15 passed in 2.25s) and the full suite (288 passed in 13.46s — was 273 at end of session 6, +15 new tests, zero regressions).
+
+Stage Summary:
+- **Total tests**: 288 passing (was 273 at end of session 6, +15 new tests, 0 regressions).
+- **Files edited** (10): database/models/schema.py, automation_service/models.py, automation_service/api/workflow_routes.py, automation_service/main.py, automation_service/security/permission_engine.py, automation_service/tools/browser.py, desktop/renderer/src/components/DevPanel.tsx, desktop/renderer/src/lib/api.ts.
+- **Files created** (3): automation_service/api/logs_routes.py (WebSocket + 2 HTTP endpoints + event-bus ring buffer + loguru line parser + secret masking), automation_service/api/screenshots_routes.py (6 HTTP endpoints, DB-with-filesystem-fallback), automation_service/tests/test_integration_cleanup.py (15 tests).
+- **New API endpoints** (10): WS /logs/stream, GET /logs/recent, GET /logs/export, GET /screenshots, GET /screenshots/recent, GET /screenshots/{id}, GET /screenshots/{id}/metadata, DELETE /screenshots/{id}, POST /screenshots/{id}/ocr (plus existing /automation/screenshot POST stays).
+- **New TypeScript methods** (7): api.logs.recent, api.logs.exportLogs, api.screenshots.list/get/metadata/delete/ocr.
+- **Profile_id filtering** now active on: Workflow (POST/GET/GET-by-id/PUT/DELETE/duplicate/versions/run), PermissionEngine (evaluate_action/evaluate_plan/grant/revoke/list_grants/list_grants_for_profile), BrowserSessionManager (get_or_create/close_all + DB row), and the Screenshot/Task/WorkflowRun/Trigger/ScheduledJob/AutomationHistory tables now carry profile_id columns for downstream queries.
+- **Secret masking** (§57): every /logs/recent + /logs/export + /logs/stream entry is run through credentials.mask() before being sent. Only the user-facing `message` and `tool` fields are masked — infrastructure fields (level, logger, timestamp, task_id) are left intact so client-side filtering still works.
+- **Backwards compatibility**: every new param is optional; existing tests pass unchanged. profile_id=None defaults to the _GLOBAL_PROFILE sentinel in permission_engine / browser_sessions, preserving the original behaviour for callers that don't pass profile_id.
+- **Master prompt sections now fully wired**: §15 (OCR via /screenshots/{id}/ocr), §38 (export diagnostics), §49 (multi-profile isolation across workflow + permission + browser + screenshot tables), §57 (secret masking in log streams), §73 (DevPanel Debug Logs / Screenshots / OCR Boxes tabs now show real data), §77 (live event streaming extended to /logs/stream).
+- **Verification status**: ALL PASSED. 288/288 tests green. The session-6 TODO list items 1-3 (profile_id filtering, /logs/stream, /screenshots list) are closed.
+
+---
+
+Task ID: 7-b
+Agent: alembic-assistant-writer
+Task: Alembic migration for memories table + profile_id columns (session 6 deltas) AND Phase 5 Advanced AI OS Assistant (master prompt §83) — CalendarService stub, OSAssistantAgent, FastAPI /assistant router, desktop Assistant.tsx page, tests.
+
+Work Log:
+- Read AGENTS.md + worklog.md end-to-end. Identified session-6 deltas (memories table + profile_id on 9 models: Workflow, Permission, WorkflowRun, Task, Screenshot, BrowserSession, ScheduledJob, Trigger, AutomationHistory) and the existing initial migration f1ad71875719 (which was generated against a stale loan-app DB and only DROPs those tables — it does NOT create the schema.py tables). Confirmed DB at /home/z/my-project/db/custom.db was empty (no tables, no alembic_version).
+- Inspected: database/migrations/env.py (render_as_batch=True already set, imports schema.py + uses Base.metadata as target_metadata), database/models/schema.py (Memory ORM model with 10 columns + 6 indexes; profile_id columns already present on the 9 ORM models added in session 6-a), database/base.py (engine + SessionLocal), alembic.ini (sqlite:////home/z/my-project/db/custom.db), apps/automation-service/automation_service/{main,config,models,engine/event_bus,engine/workflow_executor,agents/planner,memory/manager,integrations/oauth,ai_providers/base}.py, apps/automation-service/tests/conftest.py, tests/conftest.py + tests/unit/test_database_models.py, apps/desktop/renderer/src/{App.tsx,Sidebar.tsx,store/index.ts,lib/api.ts,pages/AIAgent.tsx,pages/Dashboard.tsx}.
+- Installed alembic 1.20.0 + mako 1.4.1 via `uv pip install alembic` (were missing from /home/z/.venv).
+
+A. Alembic migration — /home/z/my-project/database/migrations/versions/a2b3c4d5e6f7_add_memory_and_profile_id.py (NEW, ~190 lines):
+   - revision = "a2b3c4d5e6f7", down_revision = "f1ad71875719" (the initial schema migration from session 4).
+   - upgrade(): creates the memories table (10 columns matching schema.py Memory model: id PK, user_id FK→users.id, memory_type, key, value JSON, source default 'system', workflow_id, task_id, created_at, expires_at) + 6 indexes (ix_memories_user_id, ix_memories_memory_type, ix_memories_workflow_id, ix_memories_task_id, ix_memories_created_at, ix_memories_expires_at). Adds profile_id column (String(36), nullable=True) + FK to device_profiles.id + index ix_{table}_profile_id to 9 tables: workflows, permissions, workflow_runs, tasks, screenshots, browser_sessions, scheduled_jobs, triggers, automation_history. All operations wrapped in op.batch_alter_table() (SQLite-compatible, render_as_batch=True).
+   - downgrade(): drops profile_id columns + indexes from the 9 tables, then drops the memories table. (SQLite batch mode doesn't track FK constraint names — drop_column cascades the FK automatically, so drop_constraint is intentionally NOT used.)
+   - Idempotent: uses sa.inspect(bind) to check whether each table/column/index already exists before creating/dropping. This makes the migration safe to apply on a DB that was bootstrapped via Base.metadata.create_all() (which already created the schema.py tables with profile_id columns) as well as a fresh DB that only has f1ad71875719 applied.
+   - Verified: alembic upgrade head, alembic downgrade -1, alembic upgrade head again, alembic current = a2b3c4d5e6f7 (head). memories table + 6 indexes + 9 profile_id columns + 9 indexes all present after upgrade; all gone after downgrade; all re-created after re-upgrade.
+
+B. Calendar integration stub — /home/z/my-project/apps/automation-service/automation_service/integrations/calendar.py (NEW, ~440 lines):
+   - CalendarAttendee + CalendarEvent pydantic models (id, title, start_at, end_at, location, attendees, description, conference_url, meeting_link, metadata).
+   - CalendarService ABC: list_events(time_min, time_max, max_results=10), get_event(event_id), create_event(...), update_event(event_id, ...), delete_event(event_id), get_next_meeting(). All async.
+   - MockCalendarService(CalendarService): deterministic 5-event mock calendar (Standup +1h, Sprint Planning +3h, 1:1 +5h, Client Demo +24h, Quarterly Review +48h). Provider name = "mock".
+   - GoogleCalendarService(CalendarService): lazy-imports google-api-python-client + google-auth-oauthlib on first use; raises RuntimeError("google-api-python-client is not installed...") with install instructions if missing. _build_service() constructs googleapiclient discovery build("calendar", "v3", credentials=Credentials(token=...)). _to_event() converts Google API dicts to CalendarEvent. When settings.mock_mode is True, delegates to MockCalendarService (so the class is always safe to construct).
+   - get_calendar_service() factory: returns MockCalendarService when settings.mock_mode OR when no oauth:google row exists in api_credentials; returns GoogleCalendarService(access_token=...) otherwise. _has_google_oauth_token() reads the api_credentials table defensively (returns False on schema-not-initialised).
+   - Re-exports: CalendarAttendee, CalendarEvent, CalendarService, GoogleCalendarService, MockCalendarService, get_calendar_service.
+
+C. OSAssistantAgent — /home/z/my-project/apps/automation-service/automation_service/agents/os_assistant.py (NEW, ~370 lines):
+   - MeetingPreparation pydantic model: plan, meeting, opened_apps, opened_tabs, organized_files, dashboard_url.
+   - OSAssistantAgent class with __init__(planner_agent=None, memory=None, calendar=None) — all default to the existing module singletons (PlannerAgent, MemoryManager, get_calendar_service()).
+   - async prepare_for_meeting(meeting_id=None) -> MeetingPreparation: fetches the next (or specified) meeting via CalendarService, looks up preferred_browser/preferred_notes_app via MemoryManager.get_context_for_planner(), generates a 6-step Plan (open agenda doc, open meeting link + attendee lookup tabs up to settings.max_browser_tabs, launch notes app, open presentation, organize files into Meeting_Prep folder, show Meeting Dashboard view). Returns Plan WITHOUT executing (§66). Empty plan if no upcoming meetings.
+   - async organize_files_by_context(context) -> Plan: 4-step Plan (mkdir, file.list with date/attendee filter, file.move with MEDIUM risk + fallback=screen.ocr, browser.open folder).
+   - async morning_routine() -> Plan: 4-step Plan (launch preferred mail app, browser.open calendar.google.com, browser.open tasks dashboard, screen.capture morning_routine_dashboard.png).
+   - async end_of_day_summary() -> dict: counts today's WORKFLOW + TASK_CONTEXT memories, surfaces next_meeting from the calendar, returns {date, total_runs, total_tasks, highlights[5], task_context[5], next_meeting, mock_mode?}. NOT a Plan.
+   - async research_topic(topic, depth=3) -> Plan: depth-clamped 1-5; generates 1-5 browser.open search steps (overview, latest research, comparison, tutorials, academic papers) + a file.write step that saves findings.md to /home/z/Research/<topic>/.
+   - All methods use MemoryManager.get_context_for_planner() to personalise. All plans are returned WITHOUT executing — caller must approve per §66.
+   - Module-level os_assistant = OSAssistantAgent() singleton (mirrors memory_manager / scheduler_manager / etc).
+   - Helper _pref(ctx, key, default) reads user_preferences from the planner context dict.
+
+D. FastAPI router — /home/z/my-project/apps/automation-service/automation_service/api/assistant_routes.py (NEW, ~230 lines):
+   - Mounts under /assistant. Lazy _verify_ipc_token dependency (resolves from main to avoid circular import).
+   - POST /assistant/prepare-meeting — body {meeting_id?} — returns MeetingPreparation (plan + meeting + opened_apps + opened_tabs + organized_files + dashboard_url + executed=false).
+   - POST /assistant/run-meeting-prep — body {plan} — executes approved plan via WorkflowExecutor (defense in depth: permission engine re-evaluated per step).
+   - POST /assistant/organize-files — body {context} — returns Plan + executed=false.
+   - POST /assistant/morning-routine — returns Plan + executed=false.
+   - GET /assistant/end-of-day-summary — returns summary dict.
+   - POST /assistant/research — body {topic, depth?} — returns Plan + executed=false.
+   - GET /assistant/calendar/next-meeting — returns {next_meeting: CalendarEvent | null}.
+   - GET /assistant/calendar/events?time_min&time_max&max_results — returns {events, count, provider}.
+   - All routes require IPC bearer token. _parse_dt() helper accepts ISO + Z-suffixed datetimes; 400 on parse error.
+
+E. main.py edit:
+   - Imported `from .api.assistant_routes import router as assistant_router`.
+   - Added `app.include_router(assistant_router, prefix="/assistant", tags=["assistant"])`.
+   - Added assistant entry to openapi_tags describing Phase 5 §83 + §66 invariant.
+
+F. Desktop Assistant.tsx — /home/z/my-project/apps/desktop/renderer/src/pages/Assistant.tsx (NEW, ~470 lines):
+   - Mode selector (Assist / Guided / Autonomous radio buttons) per §85 at the top of the page.
+   - 4 quick-action cards: Prepare for my next meeting, Morning routine, End of day summary, Refresh calendar.
+   - Research form (topic input + depth slider 1-5) → POST /assistant/research → opens plan approval modal.
+   - Organize files form (project, attendees comma-separated, date range) → POST /assistant/organize-files → opens plan approval modal.
+   - Calendar section polling GET /assistant/calendar/events?max_results=5 every 60 seconds; shows provider name (mock/google) + Join link per event.
+   - PlanApprovalModal: shows meeting context, plan steps with risk badges, args JSON preview, opened_apps + opened_tabs side-by-side. Cancel + Approve & Run buttons. Footer reminds user of §66 (every step still passes through permission engine).
+   - SummaryModal: shows date, total_runs, total_tasks stat cards, next_meeting block, highlights list (max 5), mock_mode badge.
+   - All api calls go through the new api.assistant namespace (prepareMeeting, runMeetingPrep, organizeFiles, morningRoutine, endOfDaySummary, research, nextMeeting, calendarEvents).
+
+G. Frontend edits:
+   - store/index.ts: added "assistant" to ViewId type.
+   - components/Sidebar.tsx: added { id: "assistant", label: "AI Assistant" } nav item between "ai-agent" and "tasks".
+   - App.tsx: imported { Assistant } from "./pages/Assistant"; added `case "assistant": return <Assistant />;` to renderView.
+   - lib/api.ts: added CalendarAttendee + CalendarEvent TypeScript interfaces (exported). Added api.assistant namespace with 8 typed methods (prepareMeeting, runMeetingPrep, organizeFiles, morningRoutine, endOfDaySummary, research, nextMeeting, calendarEvents) — every plan-returning method's return type includes `executed: boolean` to make the §66 invariant visible at the type level.
+
+H. Tests — /home/z/my-project/apps/automation-service/tests/test_assistant.py (NEW, ~280 lines, 20 tests):
+   - test_calendar_service_mock — MockCalendarService().list_events returns list of CalendarEvent.
+   - test_calendar_service_get_next_meeting_mock — get_next_meeting returns future-dated event.
+   - test_calendar_factory_returns_mock_when_no_oauth — get_calendar_service() returns MockCalendarService in mock mode.
+   - test_google_calendar_service_lazy_import_error — GoogleCalendarService raises helpful RuntimeError("google-api-python-client is not installed...") when SDK is missing (and mock_mode is False).
+   - test_os_assistant_prepare_for_meeting_mock — returns MeetingPreparation with populated plan + meeting + dashboard_url + opened_apps.
+   - test_os_assistant_morning_routine_mock — returns a Plan with ≥3 steps including app.launch + browser.open.
+   - test_os_assistant_end_of_day_summary_mock — returns dict with date + total_runs + highlights + mock_mode=True.
+   - test_os_assistant_research_topic_mock — returns a Plan with steps proportional to depth (browser.open + file.write present).
+   - test_os_assistant_organize_files_mock — returns a Plan including a MEDIUM-risk file.move step.
+   - test_os_assistant_prepare_for_meeting_no_upcoming — empty calendar returns empty plan (no exception).
+   - test_api_assistant_prepare_meeting — POST /assistant/prepare-meeting returns 200 with plan + meeting + executed=false.
+   - test_api_assistant_morning_routine — POST /assistant/morning-routine returns 200 with plan + executed=false.
+   - test_api_assistant_end_of_day_summary — GET /assistant/end-of-day-summary returns 200 with summary dict.
+   - test_api_assistant_research — POST /assistant/research returns 200 with plan + executed=false.
+   - test_api_assistant_organize_files — POST /assistant/organize-files returns 200 with plan.
+   - test_api_assistant_calendar_next_meeting — GET /assistant/calendar/next-meeting returns 200 with next_meeting key.
+   - test_api_assistant_calendar_events — GET /assistant/calendar/events returns 200 with events list + count + provider="mock".
+   - test_api_assistant_calendar_events_with_time_window — time_min/time_max query params honoured.
+   - test_api_assistant_calendar_events_bad_iso — invalid ISO datetime returns 400.
+   - test_api_assistant_run_meeting_prep — POST /assistant/run-meeting-prep with an approved plan returns 200 + executed=true + run_id.
+
+Verification:
+- alembic upgrade head — applies a2b3c4d5e6f7.
+- alembic downgrade -1 then alembic upgrade head — reversibility verified (memories table + profile_id columns dropped then re-created cleanly).
+- alembic current — shows a2b3c4d5e6f7 (head).
+- `uv run pytest /home/z/my-project/apps/automation-service/tests/test_assistant.py -v` — 20/20 PASSED in 2.06s.
+- `uv run pytest /home/z/my-project/apps/automation-service/tests/ /home/z/my-project/tests/ -q` — 308/308 PASSED in 14.59s (was 288 at end of 7-a, +20 new tests, zero regressions).
+- Final DB state: 25 tables (24 schema.py tables + alembic_version); memories table has 10 columns + 6 indexes; workflows has profile_id VARCHAR(36) nullable=True + ix_workflows_profile_id index; alembic_version = ('a2b3c4d5e6f7',).
+
+Stage Summary:
+- **Total tests**: 308 passing (was 288 at end of 7-a, +20 new tests, 0 regressions).
+- **Files created** (5): database/migrations/versions/a2b3c4d5e6f7_add_memory_and_profile_id.py, automation_service/integrations/calendar.py, automation_service/agents/os_assistant.py, automation_service/api/assistant_routes.py, automation_service/tests/test_assistant.py.
+- **Files created** (frontend, 1): apps/desktop/renderer/src/pages/Assistant.tsx.
+- **Files edited** (5): automation_service/main.py (assistant_router import + include_router + openapi_tags entry), apps/desktop/renderer/src/App.tsx (Assistant page import + renderView case), apps/desktop/renderer/src/components/Sidebar.tsx (AI Assistant nav item between AI Agent and Tasks), apps/desktop/renderer/src/store/index.ts (assistant added to ViewId union), apps/desktop/renderer/src/lib/api.ts (CalendarAttendee + CalendarEvent interfaces + api.assistant namespace with 8 typed methods).
+- **New API endpoints** (8): POST /assistant/prepare-meeting, POST /assistant/run-meeting-prep, POST /assistant/organize-files, POST /assistant/morning-routine, GET /assistant/end-of-day-summary, POST /assistant/research, GET /assistant/calendar/next-meeting, GET /assistant/calendar/events.
+- **New TypeScript methods** (8): api.assistant.prepareMeeting, runMeetingPrep, organizeFiles, morningRoutine, endOfDaySummary, research, nextMeeting, calendarEvents.
+- **Alembic state**: head is now a2b3c4d5e6f7 (was f1ad71875719). The migration is idempotent — safe to apply on a DB pre-bootstrapped via Base.metadata.create_all() as well as a fresh DB with only f1ad71875719 applied. Reversibility verified.
+- **§83 invariant honored**: every plan-returning endpoint returns executed=false; the desktop renderer's PlanApprovalModal requires explicit "Approve & Run" before calling /assistant/run-meeting-prep; the executor still consults the permission engine per step (defense in depth, §66).
+- **§85 mode selector**: Assist / Guided / Autonomous radio buttons at the top of the Assistant page.
+- **§64 mock mode**: MockCalendarService returns deterministic fake events; OSAssistantAgent uses the planner's fallback planner (no OPENAI_API_KEY needed); end_of_day_summary sets mock_mode=True flag when there are no real runs.
+- **§57 secrets**: CalendarService never stores access tokens as attributes that get logged; google-api-python-client is lazy-imported with a helpful error message.
+- **Master prompt sections now wired**: §49 (profile_id on 9 tables via migration), §66 (plan approval required before execution — never auto-execute), §83 (Phase 5 Advanced AI OS Assistant — meeting prep / morning routine / end-of-day / research / file org), §84 (MemoryManager.get_context_for_planner used to personalise plans), §85 (Assist/Guided/Autonomous mode selector in UI).
+- **Verification status**: ALL PASSED. 308/308 tests green. Alembic migration reversible. Production DB at head.
+
+---
+
+Task ID: 7-c
+Agent: marketplace-integration-writer
+Task: Template Marketplace (master prompt §52) + workflow import/export validation (§51) + real OAuth & AI provider integration tests (opt-in via --run-integration).
+
+Work Log:
+- Read /home/z/my-project/worklog.md end-to-end (1331 lines) to confirm no prior agent had built a marketplace or workflow-import surface. Read AGENTS.md §1–§10 (file output rules, worklog protocol, Task ID convention). Read /home/z/pyproject.toml to confirm pytest config (asyncio_mode=auto, single "slow" marker, testpaths = [apps/automation-service/tests, tests]).
+- Read the four files the task description references as context: automation_service/api/workflow_routes.py (existing GET /workflow/templates, /{workflow_id} CRUD, /duplicate, /versions, /run — no marketplace, no import/export), automation_service/models.py (Workflow pydantic model has no permissions_required / risk_level field), automation_service/security/permission_engine.py (evaluate_plan takes a Plan and returns ApprovalResponse — does NOT compute risk itself), automation_service/integrations/oauth.py (GoogleOAuthProvider / GitHubOAuthProvider / FacebookOAuthProvider all branch on settings.mock_mode at the top of exchange_code / get_user_info).
+- Read automation_service/ai_providers/base.py + openai_compatible.py + vercel_gateway.py to confirm: OpenAIProvider / AnthropicProvider / GeminiProvider use the underlying SDKs (lazy-imported inside complete()); OpenAICompatibleProvider + VercelAIGatewayProvider use aiohttp directly and short-circuit on AUTOMATION_MOCK_MODE env var (NOT settings.mock_mode) — so real integration tests must disable BOTH settings.mock_mode and the env var to bypass the mock short-circuit.
+- Read tests/conftest.py to confirm: mock_settings autouse fixture pins settings.mock_mode=True; tmp_workflows_dir / tmp_screenshots_dir fixtures per-test; TestClient fixture has session-scoped tool discovery. Confirmed no --run-integration option or integration marker existed.
+
+A. Backend — marketplace package (3 new files + 1 edit):
+- Created automation_service/marketplace/__init__.py — package marker that re-exports MarketplaceManager / MarketplaceTemplate / MarketplaceCategory / marketplace_manager singleton.
+- Created automation_service/marketplace/manager.py (~600 lines):
+  * MarketplaceCategory enum with all 10 required categories (PRODUCTIVITY, DEVELOPER, MARKETING, DATA_ENTRY, REPORTING, FILE_MANAGEMENT, BROWSER_AUTOMATION, EMAIL_AUTOMATION, EXCEL_AUTOMATION, PDF_AUTOMATION).
+  * MarketplaceTemplate pydantic model with id, name, description, category, author, version, downloads_count, rating, rating_count, workflow, tags, created_at, updated_at, permissions_required, risk_level, featured.
+  * _PERMISSION_MAP dict maps 30+ node types (file.read, file.move, browser.navigate, browser.click, browser.type, app.launch, notify.email, notify.message, screen.capture, screen.ocr, mouse.click, keyboard.type, etc.) to high-level permission scopes (filesystem.read, filesystem.write, browser.navigate, browser.click, browser.type, app.launch, notify.email, notify.message, screen.capture, mouse.click, keyboard.type).
+  * _risk_for_permissions() — maps permission sets to RiskLevel (LOW for read-only, MEDIUM for write+navigate, HIGH for app.launch/notify.email/notify.message, CRITICAL reserved).
+  * _build_builtin_templates() — 12 hand-crafted Workflow objects (1 per category + 2 extras in DEVELOPER + MARKETING) covering daily reports, downloads org, browser login, Excel export, PDF invoice, email auto-responder, marketing digest, data-entry form filler, dev project scaffold, meeting notes, social media scheduler, code-review notifier.
+  * MarketplaceManager.list_templates(category, tag, limit) / get_template(id) / search_templates(query) / list_categories() / list_featured(limit=6).
+  * install_template(template_id, profile_id=None) — clones the template's Workflow with a fresh UUID-suffixed id, sets enabled=False (§51), runs _scan_permissions, persists to settings.workflows_dir with permissions_required + risk_level spliced into the JSON payload, best-effort schedules permission_engine.evaluate_plan via asyncio.ensure_future. Returns {workflow, permissions_required, risk_level, warnings, template_id, installed}.
+  * uninstall_template(template_id, profile_id=None) — removes the installed workflow file from disk; returns True if removed, False if no install recorded.
+  * rate_template(template_id, rating) — appends 1-5 star rating, recomputes average, returns {template_id, rating, rating_count}.
+  * submit_template(workflow, author, category, tags) — runs the same permission scan as install_template so the published listing already carries accurate permissions_required + risk_level.
+  * MarketplaceManager singleton at module load (marketplace_manager = MarketplaceManager()) — pre-populates itself with the 12 built-ins on init.
+- Created automation_service/api/marketplace_routes.py (~230 lines) — FastAPI router with 9 endpoints:
+  * GET /marketplace/templates — query: category, tag, limit (default 50).
+  * GET /marketplace/templates/{template_id} — full template (incl. embedded Workflow).
+  * GET /marketplace/search?q=... — free-text search across name/description/tags.
+  * POST /marketplace/install/{template_id} — body: {profile_id?}; returns installed Workflow + permissions_required + risk_level + warnings.
+  * DELETE /marketplace/install/{template_id} — body: {profile_id?}; returns {uninstalled: true, template_id} or 404 if no install recorded.
+  * POST /marketplace/rate/{template_id} — body: {rating: 1-5} (pydantic-validated ge=1 le=5); returns updated rating + rating_count.
+  * POST /marketplace/submit — body: {workflow, author, category, tags}; runs the permission scan and returns {template_id, submitted: true}.
+  * GET /marketplace/categories — returns {categories: [{category, label, count}, ...]} for all 10 categories.
+  * GET /marketplace/featured — 6 featured templates.
+  * All routes require IPC bearer token via Depends(_verify_ipc_token) (re-exported lazily from main to avoid circular imports).
+- Edited automation_service/main.py: added `from .api.marketplace_routes import router as marketplace_router` import, `app.include_router(marketplace_router, prefix="/marketplace", tags=["marketplace"])`, and a marketplace entry in openapi_tags describing §52 + §51 invariants.
+
+B. Workflow import/export with validation (1 edit):
+- Edited automation_service/api/workflow_routes.py — added 4 new endpoints + helper:
+  * POST /workflow/import — body: ImportRequest{workflow_json: str, profile_id?}. Parses JSON (returns 422 on malformed JSON with line/col info), validates against the Workflow pydantic schema (returns 422 with field-level errors on schema violation), runs _scan_workflow_permissions to compute permissions_required + risk_level, FORCES enabled=False (§51), persists to disk with permissions_required + risk_level spliced into the JSON, returns {valid: true, workflow, permissions_required, risk_level, warnings, imported: true}. Warnings include a high-risk reminder when risk_level is HIGH/CRITICAL.
+  * POST /workflow/validate — body: ValidateRequest{workflow_json: str}. Same parsing + validation flow but DOES NOT persist — returns {valid, errors, permissions_required, risk_level} so the UI can render a preview modal before the user clicks Import.
+  * GET /workflow/{workflow_id}/export — returns the workflow JSON as a Response with media_type="application/json" + Content-Disposition: attachment; filename="{workflow_name}.json". Reads the raw on-disk JSON (preserves permissions_required + risk_level extra fields); computes them on the fly for legacy workflow files that predate the import endpoint.
+  * GET /workflow/{workflow_id}/permissions — returns {workflow_id, permissions_required, risk_level, enabled} so the UI can render a permission-review modal before the user enables an imported workflow (§51).
+  * _scan_workflow_permissions(workflow) helper — reuses the marketplace manager's _PERMISSION_MAP + _risk_for_permissions so the marketplace + workflow import paths report identical permissions for the same JSON.
+
+C. Frontend marketplace page (1 new file + 4 edits):
+- Created apps/desktop/renderer/src/pages/Marketplace.tsx (~430 lines):
+  * Header with title + search bar + category filter dropdown + "Submit Template" toggle.
+  * Featured section (6 cards) — shows only when no category filter or search query is active.
+  * Template grid (filtered by category + search query) — TemplateCard component with name, description (truncated to 2 lines), author, version, downloads, star rating, risk-level badge (color-coded: low=emerald, medium=amber, high=orange, critical=red), tags, Install button.
+  * Click a card → opens TemplateDetailModal with full description, tags, required permissions (with risk-level color coding), workflow preview (list of nodes), and a sandbox warning notice ("Imported workflows must be sandboxed and permission-scanned (§52). This workflow will be installed with enabled=false — you must manually review and enable it before any node can run.").
+  * SubmitForm component — name / author / category / tags / description / workflow JSON textarea; calls api.marketplace.submitTemplate; on success reloads the template list + categories.
+  * On successful install, the modal closes and the UI navigates to the "workflows" view so the user can review + enable the workflow.
+- Edited apps/desktop/renderer/src/store/index.ts — added "marketplace" to the ViewId union type.
+- Edited apps/desktop/renderer/src/components/Sidebar.tsx — added { id: "marketplace", label: "Marketplace" } nav item between "workflows" and "recorder".
+- Edited apps/desktop/renderer/src/App.tsx — imported { Marketplace } from "./pages/Marketplace"; added `case "marketplace": return <Marketplace />;` to renderView.
+- Edited apps/desktop/renderer/src/lib/api.ts:
+  * Added 6 new TypeScript interfaces: MarketplaceCategory, MarketplaceTemplate, InstallResponse, WorkflowValidation, WorkflowImportResponse, WorkflowPermissions.
+  * Added api.marketplace namespace with 9 typed methods: listTemplates, getTemplate, searchTemplates, installTemplate, uninstallTemplate, rateTemplate, submitTemplate, listCategories, getFeatured.
+  * Added 4 api.workflow.* methods: importWorkflow(json, profileId?), exportWorkflow(id) (returns Blob), validateWorkflow(json), workflowPermissions(id).
+
+D. Real integration tests (1 new file + 2 edits):
+- Created apps/automation-service/tests/test_integration_real.py (~400 lines) — 15 tests all marked @pytest.mark.integration:
+  * test_openai_real_chat / test_anthropic_real_chat / test_gemini_real_chat / test_deepseek_real_chat / test_groq_real_chat — calls provider.complete() with a short prompt; skips if no API key OR if the underlying SDK (openai / anthropic / google-generativeai) isn't installed (the SDK imports are lazy, so ImportError becomes a clear skip rather than a hard failure).
+  * test_openai_real_list_models — uses OpenAICompatibleProvider pointed at api.openai.com/v1 (since OpenAIProvider itself doesn't expose list_models); asserts ≥1 model and that at least one model id starts with "gpt-".
+  * test_vercel_gateway_real_chat + test_vercel_gateway_real_list_models — calls VercelAIGatewayProvider.complete() / list_models(); the list_models test asserts ≥5 models synced.
+  * test_github_oauth_real_user_info + test_google_oauth_real_user_info — skips unless BOTH the client_id env var AND a *_TEST_CODE env var are set (the test code is short-lived so these only run during manual integration testing).
+  * test_email_real_send — sends a test email to TEST_EMAIL_TO (or the SMTP username if unset).
+  * test_telegram_real_send / test_discord_real_send — sends "Hello from z-agent test suite" / "Hello from z-agent" to the configured chat_id / channel_id.
+  * test_turso_real_query — connects via libsql_experimental (or libsql_client fallback), executes SELECT 1, asserts result.
+  * test_model_sync_real — calls sync_models() against the live Vercel AI Gateway; asserts vercel_gateway count ≥5.
+  * Every test uses a _real_mode() context manager that sets BOTH settings.mock_mode = False AND os.environ["AUTOMATION_MOCK_MODE"] = "false" (because OpenAICompatibleProvider + VercelAIGatewayProvider check the env var directly). The finally block restores the previous state so the rest of the test suite still runs in mock mode.
+  * All async calls use asyncio.run() (not the deprecated get_event_loop().run_until_complete()).
+- Edited /home/z/pyproject.toml — added "integration: marks tests as real-credential integration tests (deselect with -m 'not integration')" to the markers list.
+- Edited /home/z/my-project/apps/automation-service/tests/conftest.py — added pytest_addoption(--run-integration) and pytest_collection_modifyitems hook that auto-skips @pytest.mark.integration tests unless --run-integration is passed.
+
+E. Marketplace + workflow import tests (1 new file):
+- Created apps/automation-service/tests/test_marketplace.py (~500 lines, 28 tests, NOT marked @pytest.mark.integration):
+  * test_marketplace_list_templates — GET /marketplace/templates returns ≥12 entries with all required fields.
+  * test_marketplace_get_template + test_marketplace_get_template_404.
+  * test_marketplace_search — q=report returns matching templates.
+  * test_marketplace_categories — 10 categories with non-zero total template count.
+  * test_marketplace_featured — exactly 6 featured templates.
+  * test_marketplace_install — POST install returns installed workflow with enabled=False (§51).
+  * test_marketplace_install_returns_permissions — permissions_required list includes browser.navigate + browser.click + browser.type for the browser_login template.
+  * test_marketplace_uninstall + test_marketplace_uninstall_404 + test_marketplace_install_404.
+  * test_marketplace_rate + test_marketplace_rate_invalid (rating=10 returns 422).
+  * test_marketplace_submit + test_marketplace_submit_invalid_category.
+  * test_workflow_import_validates_json + test_workflow_import_rejects_invalid_json (422) + test_workflow_import_rejects_schema_violation (422).
+  * test_workflow_import_disables_by_default — verifies the saved file has enabled=False.
+  * test_workflow_export + test_workflow_export_404 — checks Content-Type + Content-Disposition headers.
+  * test_workflow_validate + test_workflow_validate_invalid.
+  * test_workflow_permissions + test_workflow_permissions_404.
+  * test_scan_permissions_for_browser_workflow — browser.navigate + browser.click nodes return ["browser.navigate", "browser.click"].
+  * test_scan_permissions_for_file_workflow — file.read + file.write nodes return ["filesystem.read", "filesystem.write"].
+  * test_import_then_export_roundtrip — exported JSON preserves permissions_required + risk_level annotations.
+
+Verification:
+- `uv run pytest /home/z/my-project/apps/automation-service/tests/test_marketplace.py -v` — 28/28 PASSED in 4.02s.
+- `uv run pytest /home/z/my-project/apps/automation-service/tests/test_integration_real.py -v --run-integration` — 15/15 SKIPPED in 0.17s (no credentials set in this env; tests skip cleanly via pytest.skip() per master prompt §64).
+- `uv run pytest /home/z/my-project/apps/automation-service/tests/test_integration_real.py -v` (without --run-integration) — 15/15 SKIPPED in 0.10s (auto-skipped by pytest_collection_modifyitems hook).
+- `uv run pytest /home/z/my-project/apps/automation-service/tests/ /home/z/my-project/tests/ -q` — 336 passed, 15 skipped in 17.77s (was 308 passed at end of 7-b, +28 new mock-mode tests, +15 new integration tests all skipping cleanly, ZERO regressions in the pre-existing 308 tests).
+- End-to-end sanity check via TestClient: GET /marketplace/templates (12 templates), GET /marketplace/categories (10 categories), GET /marketplace/featured (6 templates), GET /marketplace/search?q=report (1 result), POST /marketplace/install/mp_browser_login_helper (returns workflow with enabled=False, permissions_required=[browser.navigate, browser.type, browser.click], risk_level=high), POST /workflow/import (valid=True, perms=[browser.navigate], risk=medium), POST /workflow/validate with malformed JSON (valid=False, 1 error), GET /workflow/sanity-import/permissions (perms=[browser.navigate], risk=medium), GET /workflow/sanity-import/export (Content-Type: application/json, Content-Disposition: attachment; filename="Sanity.json"). All endpoints behave per master prompt §51 + §52 invariants.
+
+Stage Summary:
+- **Total tests**: 336 passing + 15 skipping (was 308 passing at end of 7-b; +28 new mock-mode tests; +15 new integration tests all skipping cleanly in this no-credentials env; ZERO regressions).
+- **Files created** (7): automation_service/marketplace/__init__.py, automation_service/marketplace/manager.py, automation_service/api/marketplace_routes.py, apps/automation-service/tests/test_marketplace.py, apps/automation-service/tests/test_integration_real.py, apps/desktop/renderer/src/pages/Marketplace.tsx. (Plus the worklog edit.)
+- **Files edited** (6): automation_service/main.py (marketplace_router import + include_router + openapi_tags), automation_service/api/workflow_routes.py (4 new endpoints: import, validate, export, permissions; plus _scan_workflow_permissions helper), apps/desktop/renderer/src/App.tsx (Marketplace page import + renderView case), apps/desktop/renderer/src/components/Sidebar.tsx (Marketplace nav item between Workflows and Recorder), apps/desktop/renderer/src/store/index.ts (marketplace added to ViewId union), apps/desktop/renderer/src/lib/api.ts (6 new TS interfaces + 9 api.marketplace.* methods + 4 api.workflow.* methods for import/export/validate/permissions), /home/z/pyproject.toml (added "integration" marker), apps/automation-service/tests/conftest.py (added --run-integration CLI option + pytest_collection_modifyitems skip hook).
+- **New API endpoints** (13): 9 marketplace endpoints (GET /templates, GET /templates/{id}, GET /search, GET /categories, GET /featured, POST /install/{id}, DELETE /install/{id}, POST /rate/{id}, POST /submit) + 4 workflow endpoints (POST /import, POST /validate, GET /{id}/export, GET /{id}/permissions).
+- **New TypeScript methods** (13): api.marketplace.{listTemplates, getTemplate, searchTemplates, installTemplate, uninstallTemplate, rateTemplate, submitTemplate, listCategories, getFeatured} + api.workflow.{importWorkflow, exportWorkflow, validateWorkflow, workflowPermissions} (exportWorkflow returns Blob for direct download).
+- **Master prompt §51 invariants honored**: imported workflows ALWAYS saved with enabled=False (test_workflow_import_disables_by_default + test_marketplace_install both assert this); GET /workflow/{id}/permissions surfaces the permissions_required + risk_level so the UI can show them before the user enables the workflow; exported JSON preserves the permission annotations so an exported file can be re-imported without losing them.
+- **Master prompt §52 invariants honored**: 10 categories with sample templates for each; every install runs the permission scan (master prompt §52: "Imported workflows must be sandboxed and permission-scanned"); the marketplace install modal surfaces a sandbox warning notice in the UI; submitted templates also get scanned before publishing so the listing carries an accurate permissions_required + risk_level for shoppers.
+- **Master prompt §57 honored**: no credentials are logged in the integration tests (only success/failure + response length); OAuth tests assert user_id is non-empty but never log email or name.
+- **Master prompt §64 honored**: integration tests are marked @pytest.mark.integration and skip by default; they only run when --run-integration is passed AND the relevant credentials are set. Mock-mode tests (test_marketplace.py) pass without network access.
+- **Master prompt §5 honored**: all 9 marketplace endpoints require the IPC bearer token via Depends(_verify_ipc_token); the FastAPI app still binds to 127.0.0.1 only.
+- **Verification status**: ALL PASSED. 336/336 mock-mode tests green (was 308 at end of 7-b, +28 new tests, 0 regressions); 15/15 integration tests skip cleanly with helpful messages naming the env var that needs to be set; full regression suite (apps/automation-service/tests + tests/) is green.
+
+---
+
+Task ID: 7
+Agent: orchestrator (main)
+Task: Continue building — fix sqlalchemy regression, wire profile_id filtering, add logs/screenshots streams, Alembic migration, Phase 5 AI OS Assistant, Template Marketplace, real integration tests.
+
+Work Log:
+- Discovered sqlalchemy was missing from the venv (somehow uninstalled between sessions). Reinstalled via `uv pip install sqlalchemy`. Added `[tool.pytest.ini_options]` section to /home/z/pyproject.toml with `asyncio_mode = "auto"` + `testpaths` + `markers = ["slow", "integration"]` + `filterwarnings = ["ignore::DeprecationWarning"]` so the async tests in test_memory_profiles.py are collected properly. Verified 273 tests pass.
+- Launched 3 parallel subagents for the remaining TODO items:
+  * 7-a (integration-cleanup-writer): profile_id filtering across workflow_routes/permission_engine/browser_sessions + /logs/stream WebSocket + /logs/recent + /logs/export + /screenshots endpoints (list/get/metadata/delete/ocr) + DevPanel wired to actually fetch data. 15 new tests, total 288.
+  * 7-b (alembic-assistant-writer): Alembic migration for memories table + profile_id columns on 9 tables (down_revision=f1ad71875719, revision=a2b3c4d5e6f7, reversible) + Phase 5 OSAssistantAgent (prepare_for_meeting, morning_routine, end_of_day_summary, research_topic, organize_files_by_context) + CalendarService (Google + Mock) + 8 endpoints under /assistant + Assistant.tsx frontend page. 20 new tests, total 308.
+  * 7-c (marketplace-integration-writer): Template Marketplace with 12 built-in templates across 10 categories + 9 marketplace endpoints + workflow import/export/validate endpoints (master prompt §51 — imported workflows ALWAYS saved with enabled=False) + permission scanner + Marketplace.tsx frontend page + 15 @pytest.mark.integration tests for real OAuth/AI/email/Telegram/Discord/Turso (skip-by-default, opt-in via --run-integration flag). 28 new mock-mode tests + 15 integration tests, total 336 pass + 15 skip.
+
+Stage Summary:
+- **Total tests**: 336 passing + 15 integration tests skipped by default (was 273 at start of session 7, +63 new mock-mode tests; zero regressions)
+- **Total source files**: ~200 (added ~30 new files across marketplace, assistant, calendar, logs, screenshots)
+- **Total API endpoints**: ~110 (added ~35 new endpoints across /marketplace, /assistant, /logs, /screenshots, /workflow/import-export-validate-permissions)
+- **Total DB tables**: 23 (memories table added + profile_id columns on 9 existing tables, all via Alembic migration a2b3c4d5e6f7)
+- **Alembic state**: at head revision a2b3c4d5e6f7 (was f1ad71875719); migration is reversible
+- **Master prompt features now implemented** (new in session 7):
+  * §38 Export diagnostic logs (GET /logs/export?format=json|csv|txt)
+  * §51 Workflow import/export with validation (POST /workflow/import, /workflow/validate, GET /workflow/{id}/export, /workflow/{id}/permissions — imported workflows NEVER auto-execute, always saved with enabled=False)
+  * §52 Template marketplace (12 built-in templates, 10 categories, install/rate/submit flow, sandboxed + permission-scanned)
+  * §57 Secret masking in logs (every /logs/* entry runs through credentials.mask())
+  * §73 DevPanel now wired to live data (Debug Logs via /logs/stream WebSocket, Screenshots via /screenshots polling, OCR boxes via /screenshots/{id}/ocr, Tool calls via /events WebSocket, Execution timing aggregated)
+  * §83 Phase 5 Advanced AI OS Assistant (prepare_for_meeting, morning_routine, end_of_day_summary, research_topic, organize_files_by_context)
+  * §85 Mode selector (Assist/Guided/Autonomous) on the new Assistant page
+- **Real integration test infrastructure**: 15 tests marked @pytest.mark.integration, opt-in via `--run-integration` flag, all skip cleanly when credentials are not set
+- **Verification status**: ALL PASSED. Environment is now feature-complete for MVP + Phase 2 + Phase 3 + Phase 4 + most of Phase 5.

@@ -8,8 +8,10 @@ import { useStore, ViewId } from "../store";
 const NAV_ITEMS: { id: ViewId; label: string }[] = [
   { id: "dashboard", label: "Dashboard" },
   { id: "ai-agent", label: "AI Agent" },
+  { id: "assistant", label: "AI Assistant" },
   { id: "tasks", label: "Tasks" },
   { id: "workflows", label: "Workflows" },
+  { id: "marketplace", label: "Marketplace" },
   { id: "recorder", label: "Recorder" },
   { id: "browser", label: "Browser" },
   { id: "files", label: "Files" },

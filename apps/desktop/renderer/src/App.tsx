@@ -9,7 +9,9 @@ import { VoiceButton } from "./components/VoiceButton";
 import { DevPanel } from "./components/DevPanel";
 import { Dashboard } from "./pages/Dashboard";
 import { AIAgent } from "./pages/AIAgent";
+import { Assistant } from "./pages/Assistant";
 import { Workflows } from "./pages/Workflows";
+import { Marketplace } from "./pages/Marketplace";
 import { Tasks } from "./pages/Tasks";
 import { Logs } from "./pages/Logs";
 import { Settings } from "./pages/Settings";
@@ -63,7 +65,9 @@ function renderView(view: string): React.ReactNode {
   switch (view) {
     case "dashboard": return <Dashboard />;
     case "ai-agent": return <AIAgent />;
+    case "assistant": return <Assistant />;
     case "workflows": return <Workflows />;
+    case "marketplace": return <Marketplace />;
     case "tasks": return <Tasks />;
     case "logs": return <Logs />;
     case "integrations": return <Integrations />;

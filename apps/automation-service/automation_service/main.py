@@ -32,7 +32,11 @@ from .security.kill_switch import kill_switch
 from .api.oauth_routes import router as oauth_router
 from .api.integration_routes import router as integration_router
 from .api.workflow_routes import router as workflow_router
+from .api.marketplace_routes import router as marketplace_router
 from .api.system_routes import router as system_router
+from .api.logs_routes import router as logs_router
+from .api.screenshots_routes import router as screenshots_router
+from .api.assistant_routes import router as assistant_router
 from .scheduler.manager import scheduler_manager
 from .scheduler.api import router as schedules_router
 from .voice.api import router as voice_router
@@ -70,6 +74,7 @@ app = FastAPI(
         {"name": "tools", "description": "List available automation tools."},
         {"name": "planning", "description": "AI planning & plan execution."},
         {"name": "workflow", "description": "Workflow CRUD."},
+        {"name": "marketplace", "description": "Template marketplace (section 52) — browse, install, rate, and submit workflow templates. Imported workflows are sandboxed and permission-scanned (section 51)."},
         {"name": "automation", "description": "Mouse/keyboard/screen/file/app/browser primitives."},
         {"name": "kill-switch", "description": "Emergency stop / reset."},
         {"name": "oauth", "description": "OAuth provider integrations (Google, GitHub, Facebook)."},
@@ -79,6 +84,9 @@ app = FastAPI(
         {"name": "system", "description": "System tray state, auto-update (section 90), backup/restore (section 91)."},
         {"name": "memory", "description": "Long-term AI memory (section 84) — preferences, workflow, application, task context, temporary."},
         {"name": "profiles", "description": "Multi-profile support (section 49) — personal/work/dev/test sandboxes."},
+        {"name": "logs", "description": "Debug log streaming + recent/export (master prompt §38, §57, §73)."},
+        {"name": "screenshots", "description": "Screenshot listing, retrieval, deletion, and OCR (master prompt §15, §73)."},
+        {"name": "assistant", "description": "Phase 5 Advanced AI OS Assistant (master prompt §83) — contextual multi-step automation: prepare-meeting, morning routine, end-of-day summary, research, file organisation. Plans never auto-execute (§66)."},
     ],
 )
 
@@ -194,18 +202,39 @@ async def cancel_run(run_id: str) -> dict:
 async def save_workflow(workflow: Workflow) -> dict:
     wf_path = settings.workflows_dir / f"{workflow.id}.json"
     wf_path.write_text(workflow.model_dump_json(indent=2), encoding="utf-8")
-    return {"id": workflow.id, "saved": True}
+    return {"id": workflow.id, "saved": True, "profile_id": workflow.profile_id}
 
 
 @app.get("/workflow", dependencies=[Depends(verify_ipc_token)])
-async def list_workflows() -> list[dict]:
+async def list_workflows(
+    profile_id: str | None = None,
+) -> list[dict]:
+    """List saved workflows.
+
+    If ``profile_id`` is supplied, only workflows whose ``profile_id`` is
+    either ``None`` (global) or equal to the requested profile are returned
+    — master prompt §49 (profile isolation).
+    """
     out = []
     for p in settings.workflows_dir.glob("*.json"):
         try:
             wf = Workflow.model_validate_json(p.read_text(encoding="utf-8"))
-            out.append({"id": wf.id, "name": wf.name, "version": wf.version, "enabled": wf.enabled})
         except Exception:
             continue
+        # Profile filtering — global workflows (profile_id=None) are always
+        # visible; profile-scoped workflows are visible only to that profile.
+        if profile_id is not None:
+            if wf.profile_id is not None and wf.profile_id != profile_id:
+                continue
+        out.append(
+            {
+                "id": wf.id,
+                "name": wf.name,
+                "version": wf.version,
+                "enabled": wf.enabled,
+                "profile_id": wf.profile_id,
+            }
+        )
     return out
 
 
@@ -343,7 +372,11 @@ app.include_router(oauth_router, prefix="/oauth", tags=["oauth"])
 app.include_router(integration_router, prefix="/integrations", tags=["integrations"])
 app.include_router(schedules_router, prefix="/schedules", tags=["scheduler"])
 app.include_router(workflow_router, prefix="/workflow", tags=["workflow"])
+app.include_router(marketplace_router, prefix="/marketplace", tags=["marketplace"])
 app.include_router(voice_router, prefix="/voice", tags=["voice"])
 app.include_router(system_router, prefix="/system", tags=["system"])
 app.include_router(memory_router, prefix="/memory", tags=["memory"])
 app.include_router(profiles_router, prefix="/profiles", tags=["profiles"])
+app.include_router(logs_router, prefix="/logs", tags=["logs"])
+app.include_router(screenshots_router, prefix="/screenshots", tags=["screenshots"])
+app.include_router(assistant_router, prefix="/assistant", tags=["assistant"])

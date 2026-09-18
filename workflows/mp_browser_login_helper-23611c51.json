@@ -1,0 +1,111 @@
+{
+  "id": "mp_browser_login_helper-23611c51",
+  "name": "Browser Login Helper",
+  "version": 1,
+  "description": "Open the configured browser, navigate to the login page, fill in credentials from the secret store, and submit the form. Designed to be triggered manually.",
+  "trigger": {
+    "type": "manual",
+    "cron": null,
+    "file_pattern": null,
+    "hotkey": null,
+    "webhook_url": null,
+    "timezone": "UTC"
+  },
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "args": {},
+      "next": "open_browser",
+      "on_error": null,
+      "timeout_ms": 30000,
+      "retry_count": 0,
+      "retry_delay_ms": 1000
+    },
+    {
+      "id": "open_browser",
+      "type": "browser.open",
+      "args": {
+        "browser": "chrome"
+      },
+      "next": "navigate",
+      "on_error": null,
+      "timeout_ms": 30000,
+      "retry_count": 0,
+      "retry_delay_ms": 1000
+    },
+    {
+      "id": "navigate",
+      "type": "browser.navigate",
+      "args": {
+        "url": "https://example.com/login"
+      },
+      "next": "type_email",
+      "on_error": null,
+      "timeout_ms": 30000,
+      "retry_count": 0,
+      "retry_delay_ms": 1000
+    },
+    {
+      "id": "type_email",
+      "type": "browser.type",
+      "args": {
+        "selector": "#email",
+        "text": "{{secrets.email}}"
+      },
+      "next": "type_password",
+      "on_error": null,
+      "timeout_ms": 30000,
+      "retry_count": 0,
+      "retry_delay_ms": 1000
+    },
+    {
+      "id": "type_password",
+      "type": "browser.type",
+      "args": {
+        "selector": "#password",
+        "text": "{{secrets.password}}"
+      },
+      "next": "submit",
+      "on_error": null,
+      "timeout_ms": 30000,
+      "retry_count": 0,
+      "retry_delay_ms": 1000
+    },
+    {
+      "id": "submit",
+      "type": "browser.click",
+      "args": {
+        "selector": "button[type=submit]"
+      },
+      "next": "end",
+      "on_error": null,
+      "timeout_ms": 30000,
+      "retry_count": 0,
+      "retry_delay_ms": 1000
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "args": {},
+      "next": null,
+      "on_error": null,
+      "timeout_ms": 30000,
+      "retry_count": 0,
+      "retry_delay_ms": 1000
+    }
+  ],
+  "variables": {
+    "secrets.email": "user@example.com"
+  },
+  "enabled": false,
+  "profile_id": null,
+  "created_at": "2026-09-18T06:26:07.110319Z",
+  "updated_at": "2026-09-18T06:26:07.110319Z",
+  "permissions_required": [
+    "browser.navigate",
+    "browser.type",
+    "browser.click"
+  ],
+  "risk_level": "high"
+}

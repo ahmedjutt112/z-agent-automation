@@ -3,24 +3,29 @@
  *
  * A collapsible bottom-docked panel. Visible only when developer_mode=true
  * (toggled from Settings -> Advanced -> Developer Mode). Shows live:
- *   - tool calls (rolling log with timestamps + duration)
- *   - current workflow JSON
+ *   - tool calls (rolling log with timestamps + duration) — from /events WS
+ *   - current workflow JSON (polled every 2s)
  *   - automation events (streamed via the /events WebSocket)
- *   - debug logs
+ *   - debug logs (streamed via /logs/stream WebSocket, level=DEBUG)
  *   - browser selectors used by browser.* tools
- *   - OCR boxes (when screen.ocr runs)
- *   - last 5 screenshot thumbnails
+ *   - OCR boxes (fetched on demand via POST /screenshots/{id}/ocr)
+ *   - last 20 screenshot thumbnails (polled every 5s from GET /screenshots)
  *   - per-tool latency (avg / p50 / p99)
  *
  * CRITICAL (section 73): "Developer mode must not expose secrets." Any value
- * that looks like a password / API key / token is masked before rendering.
+ * that looks like a password / API key / token is masked before rendering
+ * — both on the client (SECRET_PATTERNS below) and on the server (every
+ * /logs/* entry is run through credentials.mask() before being sent).
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../store";
 
 const MAX_LOG_LINES = 500;
-const MAX_SCREENSHOTS = 5;
+const MAX_SCREENSHOTS = 20;
+const LOGS_WS_URL = "ws://127.0.0.1:8765/logs/stream?level=DEBUG";
+const SCREENSHOTS_API = "http://127.0.0.1:8765/screenshots";
+const SCREENSHOT_BASE = "http://127.0.0.1:8765/screenshots";
 
 type Tab =
   | "tools"
@@ -38,6 +43,7 @@ interface ToolCall {
   args: Record<string, unknown>;
   duration_ms?: number;
   status?: string;
+  target?: string;
 }
 
 interface AutomationEvent {
@@ -46,16 +52,38 @@ interface AutomationEvent {
   payload: Record<string, unknown>;
 }
 
-interface LogLine {
-  ts: number;
-  level: "debug" | "info" | "warn" | "error";
+interface LogEntry {
+  timestamp: string;
+  level: string;
+  logger: string;
   message: string;
+  tool?: string | null;
+  task_id?: string | null;
 }
 
-interface Screenshot {
-  ts: number;
-  path: string;
-  url: string;
+interface ScreenshotMeta {
+  id: string;
+  task_id?: string | null;
+  profile_id?: string | null;
+  file_path: string;
+  width?: number | null;
+  height?: number | null;
+  metadata_json?: Record<string, unknown> | null;
+  created_at: string;
+}
+
+interface OcrBoundingBox {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  confidence: number;
+}
+
+interface OcrResult {
+  text: string;
+  bounding_boxes: OcrBoundingBox[];
 }
 
 interface TimingEntry {
@@ -155,13 +183,16 @@ export function DevPanel() {
 
   const [toolCalls, setToolCalls] = useState<ToolCall[]>([]);
   const [events, setEvents] = useState<AutomationEvent[]>([]);
-  const [logs, setLogs] = useState<LogLine[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   const [selectors, setSelectors] = useState<{ ts: number; selector: string }[]>([]);
-  const [screenshots, setScreenshots] = useState<Screenshot[]>([]);
+  const [screenshots, setScreenshots] = useState<ScreenshotMeta[]>([]);
   const [workflowJson, setWorkflowJson] = useState<string>("{}");
+  const [selectedScreenshot, setSelectedScreenshot] = useState<ScreenshotMeta | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const logsWsRef = useRef<WebSocket | null>(null);
+  const logsBottomRef = useRef<HTMLDivElement | null>(null);
 
-  // Subscribe to the /events WebSocket — section 76.
+  // ---- /events WebSocket — tool calls + selectors + events tabs ----
   useEffect(() => {
     if (!developerMode) return;
     if (typeof window === "undefined") return;
@@ -182,8 +213,11 @@ export function DevPanel() {
             payload: msg.payload,
           };
           setEvents((prev) => [...prev.slice(-MAX_LOG_LINES + 1), evt]);
-          // Route payload to the right bucket.
-          if (msg.type === "STEP_STARTED" || msg.type === "STEP_COMPLETED" || msg.type === "STEP_FAILED") {
+          if (
+            msg.type === "STEP_STARTED" ||
+            msg.type === "STEP_COMPLETED" ||
+            msg.type === "STEP_FAILED"
+          ) {
             const tool = String(msg.payload?.tool ?? "");
             const tc: ToolCall = {
               ts: Date.now(),
@@ -191,12 +225,16 @@ export function DevPanel() {
               args: (msg.payload?.args as Record<string, unknown>) ?? {},
               duration_ms: msg.payload?.duration_ms as number | undefined,
               status: msg.type,
+              target:
+                (msg.payload?.target as string | undefined) ??
+                (msg.payload?.selector as string | undefined),
             };
             setToolCalls((prev) => [...prev.slice(-MAX_LOG_LINES + 1), tc]);
-            // Browser selectors.
             if (tool.startsWith("browser.") && msg.payload?.selector) {
               setSelectors((prev) =>
-                [...prev, { ts: Date.now(), selector: String(msg.payload.selector) }].slice(-MAX_LOG_LINES),
+                [...prev, { ts: Date.now(), selector: String(msg.payload.selector) }].slice(
+                  -MAX_LOG_LINES,
+                ),
               );
             }
           }
@@ -205,8 +243,9 @@ export function DevPanel() {
               [
                 ...prev,
                 {
-                  ts: Date.now(),
-                  level: "error" as const,
+                  timestamp: new Date().toISOString(),
+                  level: "error",
+                  logger: "automation_service.events",
                   message: String(msg.payload?.error ?? ""),
                 },
               ].slice(-MAX_LOG_LINES),
@@ -226,7 +265,67 @@ export function DevPanel() {
     };
   }, [developerMode]);
 
-  // Fetch the latest workflow JSON every 2s when developer mode is on.
+  // ---- /logs/stream WebSocket — Debug Logs tab ----
+  useEffect(() => {
+    if (!developerMode) return;
+    if (typeof window === "undefined") return;
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket(LOGS_WS_URL);
+    } catch {
+      ws = null;
+    }
+    logsWsRef.current = ws;
+    if (ws) {
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data) as
+            | { type: "backfill"; entries: LogEntry[] }
+            | { type: "log"; entry: LogEntry }
+            | { type: "heartbeat"; ts: string }
+            | { type: "error"; message: string };
+          if (msg.type === "backfill" && Array.isArray(msg.entries)) {
+            setLogs((prev) => {
+              const merged = [...prev, ...msg.entries];
+              return merged.slice(-MAX_LOG_LINES);
+            });
+          } else if (msg.type === "log" && msg.entry) {
+            setLogs((prev) => [...prev.slice(-MAX_LOG_LINES + 1), msg.entry]);
+          } else if (msg.type === "error") {
+            setLogs((prev) =>
+              [
+                ...prev,
+                {
+                  timestamp: new Date().toISOString(),
+                  level: "error",
+                  logger: "automation_service.logs",
+                  message: msg.message,
+                },
+              ].slice(-MAX_LOG_LINES),
+            );
+          }
+        } catch {
+          /* ignore malformed frames */
+        }
+      };
+    }
+    return () => {
+      try {
+        ws?.close();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [developerMode]);
+
+  // Auto-scroll the logs panel to the bottom whenever new entries arrive.
+  useEffect(() => {
+    if (logsBottomRef.current) {
+      logsBottomRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [logs]);
+
+  // ---- Fetch the latest workflow JSON every 2s ----
   useEffect(() => {
     if (!developerMode) return;
     let cancelled = false;
@@ -255,14 +354,28 @@ export function DevPanel() {
     };
   }, [developerMode]);
 
-  // Periodically poll screenshots dir to populate thumbnails (mock-friendly).
+  // ---- Poll screenshots every 5s ----
   useEffect(() => {
     if (!developerMode) return;
-    // We don't have a screenshots listing endpoint — leave thumbnails empty
-    // unless the event stream pushes one. This is intentional: master prompt
-    // section 73 requires us to NEVER auto-read screenshots that could contain
-    // sensitive data; we only show ones the workflow executor explicitly
-    // surfaced via STEP_COMPLETED payloads.
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const resp = await fetch(`${SCREENSHOTS_API}?limit=${MAX_SCREENSHOTS}`);
+        if (!resp.ok) return;
+        const list = (await resp.json()) as ScreenshotMeta[];
+        if (!cancelled && Array.isArray(list)) {
+          setScreenshots(list);
+        }
+      } catch {
+        /* network down — silently ignore */
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
   }, [developerMode]);
 
   if (!developerMode) return null;
@@ -321,11 +434,22 @@ export function DevPanel() {
             {tab === "tools" && <ToolCallsTab calls={toolCalls} />}
             {tab === "workflow" && <WorkflowJsonTab json={workflowJson} />}
             {tab === "events" && <EventsTab events={events} />}
-            {tab === "logs" && <LogsTab logs={logs} />}
+            {tab === "logs" && <LogsTab logs={logs} bottomRef={logsBottomRef} />}
             {tab === "selectors" && <SelectorsTab selectors={selectors} />}
-            {tab === "ocr" && <OcrTab />}
+            {tab === "ocr" && (
+              <OcrTab
+                selected={selectedScreenshot}
+                onClear={() => setSelectedScreenshot(null)}
+              />
+            )}
             {tab === "screenshots" && (
-              <ScreenshotsTab screenshots={screenshots} />
+              <ScreenshotsTab
+                screenshots={screenshots}
+                onSelect={(s) => {
+                  setSelectedScreenshot(s);
+                  setTab("ocr");
+                }}
+              />
             )}
             {tab === "timing" && <TimingTab calls={toolCalls} />}
           </div>
@@ -348,6 +472,7 @@ function ToolCallsTab({ calls }: { calls: ToolCall[] }) {
         <tr>
           <th className="pr-2">Time</th>
           <th className="pr-2">Tool</th>
+          <th className="pr-2">Target</th>
           <th className="pr-2">Args</th>
           <th className="pr-2">Duration</th>
           <th>Status</th>
@@ -363,9 +488,8 @@ function ToolCallsTab({ calls }: { calls: ToolCall[] }) {
                 {new Date(c.ts).toISOString().slice(11, 23)}
               </td>
               <td className="pr-2 text-blue-300">{c.tool}</td>
-              <td className="pr-2 break-all text-zinc-400">
-                {maskValue(c.args)}
-              </td>
+              <td className="pr-2 text-purple-300">{c.target ?? "—"}</td>
+              <td className="pr-2 break-all text-zinc-400">{maskValue(c.args)}</td>
               <td className="pr-2 text-amber-300">
                 {c.duration_ms !== undefined ? `${c.duration_ms}ms` : "—"}
               </td>
@@ -409,33 +533,39 @@ function EventsTab({ events }: { events: AutomationEvent[] }) {
   );
 }
 
-function LogsTab({ logs }: { logs: LogLine[] }) {
+function LogsTab({
+  logs,
+  bottomRef,
+}: {
+  logs: LogEntry[];
+  bottomRef: React.RefObject<HTMLDivElement | null>;
+}) {
   if (logs.length === 0)
     return <div className="text-zinc-600">No debug logs captured.</div>;
   return (
     <div className="space-y-0.5">
       {logs
         .slice(-200)
-        .reverse()
         .map((l, i) => (
           <div key={i} className="flex gap-2">
             <span className="text-zinc-500">
-              {new Date(l.ts).toISOString().slice(11, 23)}
+              {(l.timestamp || "").slice(11, 23)}
             </span>
             <span
               className={
-                l.level === "error"
+                l.level.toLowerCase() === "error"
                   ? "text-red-400"
-                  : l.level === "warn"
+                  : l.level.toLowerCase() === "warn" || l.level.toLowerCase() === "warning"
                   ? "text-amber-400"
                   : "text-zinc-400"
               }
             >
               [{l.level}]
             </span>
-            <span className="text-zinc-300">{l.message}</span>
+            <span className="text-zinc-300">{maskValue(l.message)}</span>
           </div>
         ))}
+      <div ref={bottomRef} />
     </div>
   );
 }
@@ -464,30 +594,136 @@ function SelectorsTab({
   );
 }
 
-function OcrTab() {
-  // OCR boxes overlay: we don't have a stable screenshot+boxes endpoint yet.
-  // Show a placeholder so users know where OCR boxes will appear when
-  // the screen.ocr tool emits them via the event bus.
+function OcrTab({
+  selected,
+  onClear,
+}: {
+  selected: ScreenshotMeta | null;
+  onClear: () => void;
+}) {
+  const [ocr, setOcr] = useState<OcrResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!selected) {
+      setOcr(null);
+      setError(null);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setOcr(null);
+    const controller = new AbortController();
+    fetch(`${SCREENSHOT_BASE}/${encodeURIComponent(selected.id)}/ocr`, {
+      method: "POST",
+      signal: controller.signal,
+    })
+      .then(async (resp) => {
+        if (!resp.ok) {
+          const body = await resp.json().catch(() => ({ detail: resp.statusText }));
+          throw new Error(`${resp.status}: ${body.detail || "OCR failed"}`);
+        }
+        return resp.json();
+      })
+      .then((r: OcrResult) => setOcr(r))
+      .catch((err: Error) => {
+        if (err.name !== "AbortError") setError(err.message);
+      })
+      .finally(() => setLoading(false));
+    return () => controller.abort();
+  }, [selected]);
+
+  if (!selected) {
+    return (
+      <div className="text-zinc-600">
+        Click a screenshot thumbnail in the Screenshots tab to view OCR boxes
+        overlay.
+      </div>
+    );
+  }
+  const imageUrl = `${SCREENSHOT_BASE}/${encodeURIComponent(selected.id)}`;
   return (
-    <div className="text-zinc-600">
-      OCR boxes will appear here when the screen.ocr tool emits STEP_COMPLETED
-      events with bounding boxes.
+    <div className="flex flex-col gap-2 h-full">
+      <div className="flex items-center justify-between text-xs text-zinc-400">
+        <span>
+          OCR for <span className="text-blue-300">{selected.id}</span>
+          {loading && <span className="text-amber-300 ml-2">(loading...)</span>}
+          {error && <span className="text-red-400 ml-2">error: {error}</span>}
+          {!loading && !error && ocr && (
+            <span className="text-emerald-300 ml-2">
+              ({ocr.bounding_boxes.length} boxes)
+            </span>
+          )}
+        </span>
+        <button
+          onClick={onClear}
+          className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200"
+        >
+          Clear
+        </button>
+      </div>
+      <div className="relative flex-1 overflow-auto">
+        <img
+          src={imageUrl}
+          alt={`screenshot ${selected.id}`}
+          className="max-w-none block"
+          style={{ imageRendering: "pixelated" }}
+        />
+        {!loading && ocr &&
+          ocr.bounding_boxes.map((b, i) => (
+            <div
+              key={i}
+              className="absolute border-2 border-emerald-400 bg-emerald-400/10"
+              style={{
+                left: b.x,
+                top: b.y,
+                width: b.width,
+                height: b.height,
+              }}
+              title={`${b.text} (${(b.confidence * 100).toFixed(0)}%)`}
+            >
+              <span className="absolute -top-4 left-0 text-[10px] bg-emerald-900/80 text-emerald-200 px-1 whitespace-nowrap">
+                {b.text.slice(0, 30)}
+              </span>
+            </div>
+          ))}
+      </div>
+      {ocr && ocr.text && (
+        <pre className="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 p-2 max-h-32 overflow-auto whitespace-pre-wrap">
+          {ocr.text}
+        </pre>
+      )}
     </div>
   );
 }
 
-function ScreenshotsTab({ screenshots }: { screenshots: Screenshot[] }) {
+function ScreenshotsTab({
+  screenshots,
+  onSelect,
+}: {
+  screenshots: ScreenshotMeta[];
+  onSelect: (s: ScreenshotMeta) => void;
+}) {
   if (screenshots.length === 0)
     return <div className="text-zinc-600">No screenshots captured.</div>;
   return (
     <div className="flex flex-wrap gap-2">
-      {screenshots.slice(-MAX_SCREENSHOTS).map((s, i) => (
-        <div key={i} className="border border-zinc-800 rounded p-1">
-          <img src={s.url} alt={`screenshot ${i}`} className="w-32 h-20 object-cover" />
+      {screenshots.slice(-MAX_SCREENSHOTS).map((s) => (
+        <button
+          key={s.id}
+          onClick={() => onSelect(s)}
+          className="border border-zinc-800 rounded p-1 hover:border-blue-500 cursor-pointer text-left"
+        >
+          <img
+            src={`${SCREENSHOT_BASE}/${encodeURIComponent(s.id)}`}
+            alt={`screenshot ${s.id}`}
+            className="w-32 h-20 object-cover"
+          />
           <div className="text-[10px] text-zinc-500 mt-0.5 truncate max-w-32">
-            {new Date(s.ts).toISOString().slice(11, 19)}
+            {(s.created_at || "").slice(11, 19) || s.id.slice(0, 12)}
           </div>
-        </div>
+        </button>
       ))}
     </div>
   );

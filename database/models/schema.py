@@ -186,6 +186,9 @@ class Permission(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    profile_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("device_profiles.id"), index=True, default=None
+    )
     tool_name: Mapped[str] = mapped_column(String(64), nullable=False)
     risk_level: Mapped[str] = mapped_column(String(16), nullable=False)
     decision: Mapped[str] = mapped_column(String(32), nullable=False)  # allow_once/always_allow/etc
@@ -209,6 +212,9 @@ class Workflow(Base):
     latest_version: Mapped[int] = mapped_column(Integer, default=1)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    profile_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("device_profiles.id"), index=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
@@ -256,6 +262,9 @@ class WorkflowRun(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     workflow_version_id: Mapped[str] = mapped_column(ForeignKey("workflow_versions.id"), nullable=False, index=True)
+    profile_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("device_profiles.id"), index=True, default=None
+    )
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     mode: Mapped[str] = mapped_column(String(16), default="guided")  # assist/guided/autonomous
     triggered_by: Mapped[str] = mapped_column(String(64), default="manual")
@@ -272,6 +281,9 @@ class Task(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("workflow_runs.id"), index=True)
+    profile_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("device_profiles.id"), index=True, default=None
+    )
     name: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     plan_json: Mapped[Optional[dict]] = mapped_column(JSON)
@@ -327,6 +339,9 @@ class Screenshot(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     task_id: Mapped[Optional[str]] = mapped_column(ForeignKey("tasks.id"), index=True)
+    profile_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("device_profiles.id"), index=True, default=None
+    )
     file_path: Mapped[str] = mapped_column(String(512), nullable=False)
     width: Mapped[Optional[int]] = mapped_column(Integer)
     height: Mapped[Optional[int]] = mapped_column(Integer)
@@ -340,6 +355,9 @@ class BrowserSession(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     session_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    profile_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("device_profiles.id"), index=True, default=None
+    )
     browser_type: Mapped[str] = mapped_column(String(32), default="chromium")
     user_data_dir: Mapped[Optional[str]] = mapped_column(String(512))
     is_persistent: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -358,6 +376,9 @@ class ScheduledJob(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     workflow_id: Mapped[str] = mapped_column(ForeignKey("workflows.id"), nullable=False, index=True)
+    profile_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("device_profiles.id"), index=True, default=None
+    )
     trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
     cron: Mapped[Optional[str]] = mapped_column(String(128))
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
@@ -378,6 +399,9 @@ class Trigger(Base):
     trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
     config_json: Mapped[Optional[dict]] = mapped_column(JSON)
     workflow_id: Mapped[str] = mapped_column(ForeignKey("workflows.id"), nullable=False, index=True)
+    profile_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("device_profiles.id"), index=True, default=None
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
@@ -409,6 +433,9 @@ class AutomationHistory(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), nullable=False, index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    profile_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("device_profiles.id"), index=True, default=None
+    )
     triggered_by: Mapped[str] = mapped_column(String(64), default="manual")
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     actions_count: Mapped[int] = mapped_column(Integer, default=0)

@@ -1,5 +1,6 @@
 """Workflow CRUD + run + templates FastAPI router — master prompt sections
-20 (node types), 21 (workflow JSON), 34 (workflow editor UI), 52 (templates).
+20 (node types), 21 (workflow JSON), 34 (workflow editor UI), 51 (import /
+export), 52 (templates).
 
 Endpoints (mounted under ``/workflow`` in main.py):
 
@@ -11,6 +12,12 @@ Endpoints (mounted under ``/workflow`` in main.py):
 - ``GET /workflow/{workflow_id}/versions`` — lists all versions of a workflow.
 - ``POST /workflow/{workflow_id}/run`` — executes a saved workflow via
   :class:`WorkflowExecutor.execute_workflow`.
+- ``POST /workflow/import`` — validates + imports a workflow JSON
+  (master prompt §51). Persisted with ``enabled=False``.
+- ``GET /workflow/{workflow_id}/export`` — downloads the workflow JSON file.
+- ``POST /workflow/validate`` — validates a workflow JSON without saving.
+- ``GET /workflow/{workflow_id}/permissions`` — returns the permissions
+  required by this workflow (master prompt §51).
 
 The existing ``POST /workflow`` (save) and ``GET /workflow`` (list) endpoints
 defined directly on the ``app`` instance in ``main.py`` are left intact for
@@ -24,17 +31,20 @@ history is preserved.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ..config import settings
 from ..engine.workflow_executor import WorkflowExecutor
+from ..marketplace.manager import _PERMISSION_MAP, _risk_for_permissions, _scan_node_types
 from ..models import (
     RiskLevel,
     TriggerType,
@@ -113,6 +123,37 @@ def _archive_current_version(workflow_id: str) -> None:
     next_n = len(existing) + 1
     target = vdir / f"v{next_n}.json"
     target.write_bytes(current.read_bytes())
+
+
+# ---------------------------------------------------------------------------
+# Profile access helper — master prompt §49 (multi-profile support)
+# ---------------------------------------------------------------------------
+
+
+def _check_profile_access(workflow: Workflow, profile_id: Optional[str]) -> None:
+    """Raise HTTP 403 if ``workflow.profile_id`` doesn't match the request's
+    ``profile_id``.
+
+    Backwards-compatible semantics:
+
+    * If ``profile_id`` is ``None`` (the caller didn't ask for a specific
+      profile), access is always granted — the request is unscoped.
+    * If the workflow has no ``profile_id`` (legacy data, no profile bound),
+      access is granted to any profile.
+    * Otherwise both values must be equal.
+    """
+    if profile_id is None:
+        return
+    if workflow.profile_id is None:
+        return
+    if workflow.profile_id != profile_id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            (
+                f"workflow '{workflow.id}' belongs to profile "
+                f"'{workflow.profile_id}', not '{profile_id}'"
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -328,9 +369,19 @@ async def list_workflow_templates() -> list[TemplateSummary]:
     response_model=Workflow,
     tags=["workflow"],
 )
-async def get_workflow(workflow_id: str) -> Workflow:
-    """Return the full Workflow object (master prompt §21)."""
-    return _load_workflow_or_404(workflow_id)
+async def get_workflow(
+    workflow_id: str,
+    profile_id: Optional[str] = Query(None, description="Filter by profile id"),
+) -> Workflow:
+    """Return the full Workflow object (master prompt §21).
+
+    If the workflow has a ``profile_id`` set and the caller supplies a
+    different ``profile_id`` query param, the request is rejected with
+    HTTP 403 — see :func:`_check_profile_access`.
+    """
+    wf = _load_workflow_or_404(workflow_id)
+    _check_profile_access(wf, profile_id)
+    return wf
 
 
 @router.put(
@@ -341,14 +392,18 @@ async def get_workflow(workflow_id: str) -> Workflow:
 async def update_workflow(
     workflow_id: str,
     update: WorkflowUpdate,
+    profile_id: Optional[str] = Query(None, description="Profile scope for access check"),
 ) -> dict:
     """Update an existing workflow.
 
     The previous version is archived under ``versions/{id}/v{n}.json`` and
     the top-level ``updated_at`` and (when nodes change) ``version`` are
-    bumped.
+    bumped. The workflow's ``profile_id`` is preserved across updates —
+    callers CANNOT change it via PUT (use ``POST /workflow`` to create a
+    new profile-scoped workflow).
     """
     wf = _load_workflow_or_404(workflow_id)
+    _check_profile_access(wf, profile_id)
 
     # Archive the current file before we overwrite it.
     _archive_current_version(workflow_id)
@@ -367,6 +422,10 @@ async def update_workflow(
     if update.enabled is not None:
         wf.enabled = update.enabled
 
+    # profile_id is intentionally NOT taken from `update` — preserve the
+    # original value so a profile-scoped workflow cannot be silently moved
+    # to another profile (or unscoped) via PUT.
+
     wf.updated_at = datetime.now(timezone.utc)
     _write_workflow(wf)
 
@@ -374,6 +433,7 @@ async def update_workflow(
         "id": wf.id,
         "updated": True,
         "version": wf.version,
+        "profile_id": wf.profile_id,
         "updated_at": wf.updated_at.isoformat(),
     }
 
@@ -383,8 +443,13 @@ async def update_workflow(
     dependencies=[Depends(_verify_ipc_token)],
     tags=["workflow"],
 )
-async def delete_workflow(workflow_id: str) -> dict:
+async def delete_workflow(
+    workflow_id: str,
+    profile_id: Optional[str] = Query(None, description="Profile scope for access check"),
+) -> dict:
     """Delete a workflow file. Returns 404 if it does not exist."""
+    wf = _load_workflow_or_404(workflow_id)
+    _check_profile_access(wf, profile_id)
     path = _wf_path(workflow_id)
     if not path.exists():
         raise HTTPException(
@@ -407,9 +472,17 @@ async def delete_workflow(workflow_id: str) -> dict:
     response_model=DuplicateResponse,
     tags=["workflow"],
 )
-async def duplicate_workflow(workflow_id: str) -> DuplicateResponse:
-    """Create a copy of ``workflow_id`` under a fresh UUID."""
+async def duplicate_workflow(
+    workflow_id: str,
+    profile_id: Optional[str] = Query(None, description="Profile scope for access check"),
+) -> DuplicateResponse:
+    """Create a copy of ``workflow_id`` under a fresh UUID.
+
+    The new workflow inherits the source's ``profile_id`` so it stays in
+    the same profile scope.
+    """
     src = _load_workflow_or_404(workflow_id)
+    _check_profile_access(src, profile_id)
     new_id = f"{workflow_id}-{uuid4().hex[:8]}"
     clone = src.model_copy(deep=True)
     clone.id = new_id
@@ -417,6 +490,7 @@ async def duplicate_workflow(workflow_id: str) -> DuplicateResponse:
     clone.version = 1
     clone.created_at = datetime.now(timezone.utc)
     clone.updated_at = clone.created_at
+    # profile_id is preserved via the deep copy.
     _write_workflow(clone)
     return DuplicateResponse(id=new_id, source_id=workflow_id)
 
@@ -427,15 +501,18 @@ async def duplicate_workflow(workflow_id: str) -> DuplicateResponse:
     response_model=list[VersionEntry],
     tags=["workflow"],
 )
-async def list_workflow_versions(workflow_id: str) -> list[VersionEntry]:
+async def list_workflow_versions(
+    workflow_id: str,
+    profile_id: Optional[str] = Query(None, description="Profile scope for access check"),
+) -> list[VersionEntry]:
     """List all archived versions of a workflow.
 
     Returns 200 with an empty list if the workflow exists but has no
     archived versions yet. Returns 404 if the workflow itself does not
-    exist.
+    exist. Returns 403 if ``profile_id`` doesn't match.
     """
-    # Confirm the workflow exists at all.
-    _load_workflow_or_404(workflow_id)
+    wf = _load_workflow_or_404(workflow_id)
+    _check_profile_access(wf, profile_id)
 
     vdir = settings.workflows_dir / "versions" / workflow_id
     if not vdir.exists():
@@ -443,7 +520,6 @@ async def list_workflow_versions(workflow_id: str) -> list[VersionEntry]:
     out: list[VersionEntry] = []
     for p in sorted(vdir.glob("v*.json")):
         stat = p.stat()
-        # Parse the version number from "v{n}.json".
         try:
             n = int(p.stem.removeprefix("v"))
         except ValueError:
@@ -465,19 +541,318 @@ async def list_workflow_versions(workflow_id: str) -> list[VersionEntry]:
     response_model=RunResponse,
     tags=["workflow"],
 )
-async def run_workflow(workflow_id: str) -> RunResponse:
+async def run_workflow(
+    workflow_id: str,
+    profile_id: Optional[str] = Query(None, description="Profile scope to associate the run with"),
+) -> RunResponse:
     """Execute a saved workflow.
 
     In mock mode (``settings.mock_mode=True``) we still invoke the executor
     so the node graph is walked end-to-end; the registered tools themselves
     short-circuit and return mock results without performing real I/O.
+
+    When ``profile_id`` is provided, the resulting run is tagged with that
+    profile so downstream queries (logs, screenshots, history) can be
+    filtered to the same profile.
     """
     wf = _load_workflow_or_404(workflow_id)
+    # If the workflow is profile-scoped, the request's profile_id must match
+    # (or be omitted, in which case we inherit the workflow's profile_id).
+    effective_profile_id = profile_id or wf.profile_id
+    if profile_id is not None and wf.profile_id is not None and profile_id != wf.profile_id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            (
+                f"workflow '{workflow_id}' belongs to profile "
+                f"'{wf.profile_id}', not '{profile_id}'"
+            ),
+        )
+
     executor = WorkflowExecutor()
     run_id = await executor.execute_workflow(wf)
+
+    # Record the run's profile_id on the in-memory run dict (best-effort —
+    # the executor doesn't natively know about profiles, so we patch it in
+    # here for downstream consumers to see).
+    try:
+        run_state = executor.get_status(run_id) or {}
+        run_state["profile_id"] = effective_profile_id
+        executor._runs[run_id] = run_state  # type: ignore[assignment]
+    except Exception:  # pragma: no cover — defensive
+        pass
+
     return RunResponse(
         run_id=run_id,
         workflow_id=workflow_id,
         status="running",
         mock_mode=settings.mock_mode,
     )
+
+
+# ---------------------------------------------------------------------------
+# Import / Export / Validate / Permissions — master prompt §51
+# ---------------------------------------------------------------------------
+#
+# IMPORTANT: POST /workflow/import and POST /workflow/validate are declared
+# BEFORE the existing GET /workflow/{workflow_id} route in declaration
+# order? No — they're POSTs and the existing 1-segment route is a GET, so
+# there is no conflict. They are appended at the END of the file but their
+# method (POST) disambiguates them from the GET /{workflow_id} handler.
+#
+# GET /workflow/{workflow_id}/export and GET /workflow/{workflow_id}/permissions
+# are 2-segment GETs — Starlette matches them by their literal suffix
+# (/export, /permissions) before /{workflow_id}/versions, so no conflict
+# with the existing /versions route either.
+# ---------------------------------------------------------------------------
+
+
+# Shared scanner — uses the same logic as MarketplaceManager._scan_permissions
+# so the marketplace + workflow import paths report identical permissions
+# for the same workflow JSON.
+def _scan_workflow_permissions(workflow: Workflow) -> list[str]:
+    perms: list[str] = []
+    for node_type in _scan_node_types(workflow):
+        perm = _PERMISSION_MAP.get(node_type)
+        if perm and perm not in perms:
+            perms.append(perm)
+    return perms
+
+
+class ImportRequest(BaseModel):
+    """Body for ``POST /workflow/import`` and ``POST /workflow/validate``.
+
+    ``workflow_json`` is a JSON-encoded Workflow object. We accept the raw
+    string rather than a structured Workflow so we can return a clean
+    422-style validation error when the payload is malformed.
+    """
+
+    workflow_json: str
+    profile_id: Optional[str] = None
+
+
+class ValidateRequest(BaseModel):
+    """Body for ``POST /workflow/validate`` (no profile binding)."""
+
+    workflow_json: str
+
+
+@router.post(
+    "/import",
+    dependencies=[Depends(_verify_ipc_token)],
+    tags=["workflow"],
+)
+async def import_workflow(body: ImportRequest) -> dict:
+    """Import a workflow from a JSON payload — master prompt §51.
+
+    The JSON is validated against the :class:`Workflow` pydantic schema.
+    On success the workflow is saved to disk with ``enabled=False``
+    (master prompt §51: "Never execute imported workflows automatically").
+    The response includes the workflow, the list of required permissions,
+    the overall risk_level, and any warnings from the permission scan.
+
+    On malformed JSON or schema violation the endpoint returns HTTP 422
+    with a list of errors.
+    """
+    # 1. Parse the JSON string.
+    try:
+        parsed = json.loads(body.workflow_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"workflow_json is not valid JSON: {exc.msg} (line {exc.lineno}, col {exc.colno})",
+        )
+
+    # 2. Validate against the Workflow pydantic schema.
+    try:
+        workflow = Workflow.model_validate(parsed)
+    except ValidationError as exc:
+        errors = []
+        for err in exc.errors():
+            loc = ".".join(str(p) for p in err.get("loc", []))
+            errors.append(f"{loc}: {err.get('msg', '')}")
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"workflow JSON failed schema validation: {errors}",
+        )
+
+    # 3. Permission-scan (master prompt §51: "Show permission requirements
+    #    before execution").
+    perms = _scan_workflow_permissions(workflow)
+    risk = _risk_for_permissions(perms)
+
+    # 4. Force enabled=False (master prompt §51: "Never execute imported
+    #    workflows automatically").
+    workflow.enabled = False
+    workflow.profile_id = body.profile_id
+    workflow.updated_at = datetime.now(timezone.utc)
+
+    # 5. Persist to disk with the permissions_required + risk_level spliced
+    #    into the JSON payload so the workflow editor can surface them.
+    wf_data = workflow.model_dump(mode="json")
+    wf_data["permissions_required"] = list(perms)
+    wf_data["risk_level"] = risk.value
+    path = _wf_path(workflow.id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(wf_data, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+    warnings: list[str] = []
+    if risk in {RiskLevel.HIGH, RiskLevel.CRITICAL}:
+        warnings.append(
+            f"This workflow has {risk.value} risk level — review the "
+            f"required permissions before enabling."
+        )
+    if not perms:
+        warnings.append(
+            "This workflow has no recognisable tool nodes — it may not "
+            "perform any actions when enabled."
+        )
+
+    logger.info(
+        "workflow imported id={} name={} perms={} risk={} enabled=False",
+        workflow.id, workflow.name, perms, risk.value,
+    )
+
+    return {
+        "valid": True,
+        "workflow": workflow.model_dump(mode="json"),
+        "permissions_required": perms,
+        "risk_level": risk.value,
+        "warnings": warnings,
+        "imported": True,
+    }
+
+
+@router.post(
+    "/validate",
+    dependencies=[Depends(_verify_ipc_token)],
+    tags=["workflow"],
+)
+async def validate_workflow(body: ValidateRequest) -> dict:
+    """Validate a workflow JSON without saving it — master prompt §51.
+
+    Returns ``{valid, errors, permissions_required, risk_level}`` so the
+    UI can render a preview modal BEFORE the user decides to import.
+    """
+    try:
+        parsed = json.loads(body.workflow_json)
+    except json.JSONDecodeError as exc:
+        return {
+            "valid": False,
+            "errors": [
+                f"workflow_json is not valid JSON: {exc.msg} "
+                f"(line {exc.lineno}, col {exc.colno})"
+            ],
+            "permissions_required": [],
+            "risk_level": RiskLevel.LOW.value,
+        }
+
+    try:
+        workflow = Workflow.model_validate(parsed)
+    except ValidationError as exc:
+        errors = []
+        for err in exc.errors():
+            loc = ".".join(str(p) for p in err.get("loc", []))
+            errors.append(f"{loc}: {err.get('msg', '')}")
+        return {
+            "valid": False,
+            "errors": errors,
+            "permissions_required": [],
+            "risk_level": RiskLevel.LOW.value,
+        }
+
+    perms = _scan_workflow_permissions(workflow)
+    risk = _risk_for_permissions(perms)
+    return {
+        "valid": True,
+        "errors": [],
+        "permissions_required": perms,
+        "risk_level": risk.value,
+    }
+
+
+@router.get(
+    "/{workflow_id}/export",
+    dependencies=[Depends(_verify_ipc_token)],
+    tags=["workflow"],
+)
+async def export_workflow(
+    workflow_id: str,
+    profile_id: Optional[str] = Query(None, description="Profile scope for access check"),
+) -> Response:
+    """Download the workflow JSON as a file attachment — master prompt §51.
+
+    Content-Type: ``application/json``
+    Content-Disposition: ``attachment; filename="{workflow_name}.json"``
+
+    The exported payload preserves any extra fields (``permissions_required``,
+    ``risk_level``) that were attached to the on-disk JSON by
+    :func:`import_workflow` or :meth:`MarketplaceManager.install_template`,
+    so an exported file can be re-imported without losing its permission
+    annotations. If those fields are absent (legacy workflow file), they
+    are computed on the fly so the export is always self-describing.
+    """
+    wf = _load_workflow_or_404(workflow_id)
+    _check_profile_access(wf, profile_id)
+
+    # Read the raw on-disk JSON so we preserve any extra fields the
+    # Workflow pydantic model doesn't know about (permissions_required,
+    # risk_level). Falls back to model_dump_json if the file is missing
+    # for some reason (defensive — _load_workflow_or_404 above would
+    # have raised 404 already).
+    path = _wf_path(workflow_id)
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            # Ensure permissions_required + risk_level are present
+            # (compute on the fly if the file predates this feature).
+            if "permissions_required" not in raw:
+                perms = _scan_workflow_permissions(wf)
+                raw["permissions_required"] = perms
+                raw["risk_level"] = _risk_for_permissions(perms).value
+            payload = json.dumps(raw, indent=2, default=str)
+        except Exception:
+            payload = wf.model_dump_json(indent=2)
+    else:
+        payload = wf.model_dump_json(indent=2)
+
+    # Filename: use the workflow name (sanitised) for a friendlier download.
+    safe_name = "".join(
+        c if c.isalnum() or c in ("-", "_") else "_" for c in wf.name
+    ).strip("_") or workflow_id
+    return Response(
+        content=payload,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}.json"',
+        },
+    )
+
+
+@router.get(
+    "/{workflow_id}/permissions",
+    dependencies=[Depends(_verify_ipc_token)],
+    tags=["workflow"],
+)
+async def workflow_permissions(
+    workflow_id: str,
+    profile_id: Optional[str] = Query(None, description="Profile scope for access check"),
+) -> dict:
+    """Return the permissions required by this workflow — master prompt §51.
+
+    Surfaces ``permissions_required`` (list[str]) and ``risk_level``
+    (low|medium|high|critical) so the UI can render a permission-review
+    modal before the user enables an imported workflow.
+    """
+    wf = _load_workflow_or_404(workflow_id)
+    _check_profile_access(wf, profile_id)
+    perms = _scan_workflow_permissions(wf)
+    risk = _risk_for_permissions(perms)
+    return {
+        "workflow_id": workflow_id,
+        "permissions_required": perms,
+        "risk_level": risk.value,
+        "enabled": wf.enabled,
+    }

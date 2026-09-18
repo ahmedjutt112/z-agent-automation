@@ -12,6 +12,11 @@ mouse / keyboard / browser / network I/O). This file:
    model tests under ``tests/unit/``.
 5. Provides a ``mock_settings`` fixture that pins ``settings.mock_mode=True``
    for the duration of every test (defensive — even if a stray env var leaks).
+
+Integration tests (marked with ``@pytest.mark.integration``) are SKIPPED by
+default. They only run when the ``--run-integration`` flag is passed to
+pytest AND the relevant credentials are present in env vars. See
+``tests/test_integration_real.py``.
 """
 
 from __future__ import annotations
@@ -49,6 +54,43 @@ from automation_service.config import settings  # noqa: E402
 from automation_service.engine.tool_registry import tool_registry  # noqa: E402
 from automation_service.security.kill_switch import kill_switch  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# pytest CLI option: --run-integration
+# ---------------------------------------------------------------------------
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register the ``--run-integration`` CLI flag.
+
+    When passed, integration tests (marked with ``@pytest.mark.integration``)
+    are NOT skipped. Otherwise they are skipped so the default test suite
+    runs without network access or real credentials.
+    """
+    parser.addoption(
+        "--run-integration",
+        action="store_true",
+        default=False,
+        help="Run real-credential integration tests (skipped by default).",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config,
+    items: list[pytest.Item],
+) -> None:
+    """Skip ``@pytest.mark.integration`` tests unless ``--run-integration``
+    was passed on the command line.
+    """
+    if config.getoption("--run-integration"):
+        return  # The flag was passed — don't skip anything.
+    skip_integration = pytest.mark.skip(
+        reason="Integration test — pass --run-integration to enable.",
+    )
+    for item in items:
+        if "integration" in item.keywords:
+            item.add_marker(skip_integration)
 
 
 # ---------------------------------------------------------------------------
