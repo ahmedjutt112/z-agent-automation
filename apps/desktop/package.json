@@ -10,6 +10,13 @@
     "dev:renderer": "vite",
     "build": "tsc -b && vite build",
     "build:electron": "tsc -p electron/tsconfig.json",
+    "build:all": "tsc -b && vite build && tsc -p electron/tsconfig.json",
+    "pack": "npm run build:all && electron-builder --dir",
+    "dist": "npm run build:all && electron-builder",
+    "dist:win": "npm run build:all && electron-builder --win",
+    "dist:mac": "npm run build:all && electron-builder --mac",
+    "dist:linux": "npm run build:all && electron-builder --linux",
+    "release": "npm run build:all && electron-builder --publish always",
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",
@@ -37,6 +44,7 @@
     "concurrently": "^8.2.2",
     "cross-env": "^7.0.3",
     "electron": "^31.3.0",
+    "electron-builder": "^24.13.3",
     "postcss": "^8.4.39",
     "prettier": "^3.3.3",
     "tailwindcss": "^3.4.7",
@@ -47,5 +55,8 @@
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "build": {
+    "extends": "./electron-builder.yml"
   }
 }

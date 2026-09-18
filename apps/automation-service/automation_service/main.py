@@ -37,6 +37,12 @@ from .api.system_routes import router as system_router
 from .api.logs_routes import router as logs_router
 from .api.screenshots_routes import router as screenshots_router
 from .api.assistant_routes import router as assistant_router
+from .api.recorder_routes import router as recorder_router
+from .api.browser_routes import router as browser_router
+from .api.files_routes import router as files_router
+from .api.history_routes import router as history_router
+from .api.ai_models_routes import router as ai_models_router
+from .api.permissions_routes import router as permissions_router
 from .scheduler.manager import scheduler_manager
 from .scheduler.api import router as schedules_router
 from .voice.api import router as voice_router
@@ -380,3 +386,19 @@ app.include_router(profiles_router, prefix="/profiles", tags=["profiles"])
 app.include_router(logs_router, prefix="/logs", tags=["logs"])
 app.include_router(screenshots_router, prefix="/screenshots", tags=["screenshots"])
 app.include_router(assistant_router, prefix="/assistant", tags=["assistant"])
+# Task recorder — master prompt §22 (Task Recorder) + §35 (Recorder UI).
+app.include_router(recorder_router, prefix="/recorder", tags=["recorder"])
+# Browser sessions — master prompt §16 (Playwright) + §17 (browser agent).
+app.include_router(browser_router, prefix="/browser", tags=["browser"])
+# Files — master prompt §18 (file automation) + §55 (file security).
+app.include_router(files_router, prefix="/files", tags=["files"])
+# Task history — master prompt §36 (task history).
+app.include_router(history_router, prefix="/history", tags=["history"])
+# AI models / providers / credentials — master prompt §6 (52 AI providers)
+# + §28 (credential security) + §57 (never log secrets).
+# Mounted at the root (NOT under a prefix) because the routes themselves
+# are /ai-models, /providers, /credentials.
+app.include_router(ai_models_router, tags=["ai-models"])
+# Permissions — master prompt §9 (risk levels) + §10 (human confirmation)
+# + §55 (security architecture) + §88 (rate limits).
+app.include_router(permissions_router, prefix="/permissions", tags=["permissions"])

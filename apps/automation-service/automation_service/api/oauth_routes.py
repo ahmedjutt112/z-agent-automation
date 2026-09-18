@@ -6,11 +6,18 @@ Endpoints (mounted under ``/oauth`` in main.py):
   code, persists tokens to ``api_credentials``, returns an HTML success page.
 - ``GET /oauth/status`` — lists configured providers + connected accounts.
 - ``POST /oauth/{provider}/disconnect`` — revokes + removes stored tokens.
+- ``POST /oauth/{provider}/refresh`` — exchanges a refresh_token for a new
+  access_token (master prompt §54 OAuth refresh-token flow).
+- ``POST /oauth/{provider}/revoke`` — revokes an access_token at the provider.
+- ``GET /oauth/{provider}/validate`` — checks whether an access_token is valid.
 
 All authenticated routes use the ``verify_ipc_token`` dependency from
 ``automation_service.main``. CSRF prevention: ``state`` is generated server-side
 and stored in an in-memory TTL cache (5 min) on ``/start`` and verified on
 ``/callback``.
+
+Master prompt §57: tokens are NEVER logged. Any debug log line that
+references a token uses ``mask()`` from ``..security.credentials``.
 """
 
 from __future__ import annotations
@@ -18,11 +25,12 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from loguru import logger
+from pydantic import BaseModel
 
 from ..config import settings
 from ..integrations.oauth import (
@@ -31,9 +39,27 @@ from ..integrations.oauth import (
     get_oauth_provider,
     initiate_oauth_flow,
 )
+from ..security.credentials import mask
 
 
 router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# Pydantic request bodies for refresh / revoke / validate
+# ---------------------------------------------------------------------------
+
+
+class RefreshRequest(BaseModel):
+    """Body for ``POST /oauth/{provider}/refresh``."""
+
+    refresh_token: str
+
+
+class RevokeRequest(BaseModel):
+    """Body for ``POST /oauth/{provider}/revoke``."""
+
+    access_token: str
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +252,144 @@ async def oauth_disconnect(provider: str) -> dict[str, Any]:
         )
     removed = _disconnect_oauth(provider.lower())
     return {"provider": provider.lower(), "disconnected": removed}
+
+
+# ---------------------------------------------------------------------------
+# Token lifecycle endpoints — refresh / revoke / validate (master prompt §54)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{provider}/refresh", dependencies=[Depends(_verify_ipc_token)])
+async def oauth_refresh(provider: str, body: RefreshRequest) -> dict[str, Any]:
+    """Exchange a refresh_token for a new access_token.
+
+    Master prompt §57: the refresh_token in the request body is never
+    logged. The response contains the new access_token (caller must store
+    it) — the masked preview is the only thing logged.
+    """
+    key = provider.lower()
+    if key not in OAUTH_PROVIDERS:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"Unknown OAuth provider: {provider!r}. "
+            f"Known: {sorted(OAUTH_PROVIDERS.keys())}",
+        )
+    provider_inst = get_oauth_provider(key)
+    try:
+        new_tokens = await provider_inst.refresh_token(body.refresh_token)
+    except NotImplementedError as exc:
+        # GitHub raises this — surface as 400 with a helpful message.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            str(exc),
+        )
+    except Exception as exc:
+        logger.error(
+            "OAuth refresh for {} failed (refresh_token preview={}): {}",
+            key, mask(body.refresh_token), exc,
+        )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"OAuth refresh failed for provider '{key}': {exc}",
+        )
+
+    # Persist the new tokens so subsequent calls (calendar, etc.) use them.
+    try:
+        from ..integrations.oauth import store_tokens
+        store_tokens(key, new_tokens)
+    except Exception as exc:
+        logger.warning("Failed to persist refreshed tokens for {}: {}", key, exc)
+
+    logger.info(
+        "OAuth refresh succeeded for provider={} (new access_token preview={})",
+        key, mask(new_tokens.access_token),
+    )
+    return {
+        "provider": key,
+        "access_token": new_tokens.access_token,
+        "refresh_token": new_tokens.refresh_token,
+        "expires_at": new_tokens.expires_at.isoformat() if new_tokens.expires_at else None,
+        "scope": new_tokens.scope,
+        "token_type": new_tokens.token_type,
+    }
+
+
+@router.post("/{provider}/revoke", dependencies=[Depends(_verify_ipc_token)])
+async def oauth_revoke(provider: str, body: RevokeRequest) -> dict[str, Any]:
+    """Revoke an access_token at the provider.
+
+    Returns ``{"revoked": True}`` on HTTP 200, ``{"revoked": False}`` on
+    non-fatal failure (the caller can still drop the token locally).
+    """
+    key = provider.lower()
+    if key not in OAUTH_PROVIDERS:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"Unknown OAuth provider: {provider!r}. "
+            f"Known: {sorted(OAUTH_PROVIDERS.keys())}",
+        )
+    provider_inst = get_oauth_provider(key)
+    try:
+        revoked = await provider_inst.revoke_token(body.access_token)
+    except NotImplementedError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    except Exception as exc:
+        logger.error(
+            "OAuth revoke for {} failed (access_token preview={}): {}",
+            key, mask(body.access_token), exc,
+        )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"OAuth revoke failed for provider '{key}': {exc}",
+        )
+
+    logger.info(
+        "OAuth revoke for provider={} result={} (access_token preview={})",
+        key, revoked, mask(body.access_token),
+    )
+    return {"provider": key, "revoked": revoked}
+
+
+@router.get("/{provider}/validate", dependencies=[Depends(_verify_ipc_token)])
+async def oauth_validate(
+    provider: str,
+    access_token: str = Query(..., description="The access_token to validate"),
+) -> dict[str, Any]:
+    """Validate that an access_token is still valid at the provider.
+
+    Returns ``{"provider": ..., "valid": true|false}``. A 200 response
+    does NOT mean the token is valid — check the ``valid`` field. We
+    return 200 even for invalid tokens so clients can distinguish
+    "validation service reachable + token invalid" (200, valid=false)
+    from "validation service unreachable" (502).
+    """
+    key = provider.lower()
+    if key not in OAUTH_PROVIDERS:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"Unknown OAuth provider: {provider!r}. "
+            f"Known: {sorted(OAUTH_PROVIDERS.keys())}",
+        )
+    provider_inst = get_oauth_provider(key)
+    try:
+        valid = await provider_inst.validate_token(access_token)
+    except NotImplementedError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    except Exception as exc:
+        logger.error(
+            "OAuth validate for {} failed (access_token preview={}): {}",
+            key, mask(access_token), exc,
+        )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"OAuth validate failed for provider '{key}': {exc}",
+        )
+
+    logger.info(
+        "OAuth validate for provider={} result={} (access_token preview={})",
+        key, valid, mask(access_token),
+    )
+    return {"provider": key, "valid": valid}
 
 
 # ---------------------------------------------------------------------------

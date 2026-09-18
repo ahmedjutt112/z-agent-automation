@@ -784,4 +784,367 @@ export const api = {
       }>(`/assistant/calendar/events${suffix}`);
     },
   },
+
+  // ---- Task Recorder (master prompt §22, §35) ----
+  // Captures raw mouse / keyboard / browser / file events and compiles them
+  // into a Workflow. The backend TaskRecorder is in mock_mode by default —
+  // start() just flips a flag and stop() returns a fake Recording with 3-4
+  // sample events so the to-workflow pipeline can be exercised.
+  recorder: {
+    start: () => request<{ recording: boolean; paused: boolean; events_count: number; started_at: string | null; mock_mode: boolean }>("/recorder/start", { method: "POST" }),
+    pause: () => request<{ recording: boolean; paused: boolean; events_count: number; mock_mode: boolean }>("/recorder/pause", { method: "POST" }),
+    resume: () => request<{ recording: boolean; paused: boolean; events_count: number; mock_mode: boolean }>("/recorder/resume", { method: "POST" }),
+    stop: () => request<{ recording: unknown; status: string; mock_mode: boolean }>("/recorder/stop", { method: "POST" }),
+    status: () => request<{ recording: boolean; paused: boolean; events_count: number; started_at: string | null; mock_mode: boolean }>("/recorder/status"),
+    events: () => request<{ events: unknown[]; count: number }>("/recorder/events"),
+    toWorkflow: (name?: string) =>
+      request<{ workflow: Workflow; events_count: number; mock_mode: boolean }>(
+        "/recorder/to-workflow",
+        { method: "POST", body: JSON.stringify({ name: name ?? null }) },
+      ),
+    deleteEvent: (index: number) =>
+      request<{ removed: unknown; remaining: number }>(
+        `/recorder/events/${index}`,
+        { method: "DELETE" },
+      ),
+  },
+
+  // ---- Browser sessions (master prompt §16, §17) ----
+  // In mock mode the underlying Playwright instance is never started —
+  // the routes still record session metadata so the UI's session list works.
+  browser: {
+    listSessions: () =>
+      request<{ sessions: unknown[]; count: number; mock_mode: boolean }>("/browser/sessions"),
+    createSession: (body: { browser?: string; headless?: boolean; session_id?: string }) =>
+      request<{ session: unknown; mock_mode: boolean }>("/browser/session", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    closeSession: (sessionId: string) =>
+      request<{ session_id: string; closed: boolean; mock_mode: boolean }>(
+        `/browser/session/${encodeURIComponent(sessionId)}`,
+        { method: "DELETE" },
+      ),
+    navigate: (sessionId: string, url: string) =>
+      request<{ session_id: string; url: string; title: string | null; mock_mode: boolean; result: unknown }>(
+        `/browser/session/${encodeURIComponent(sessionId)}/navigate`,
+        { method: "POST", body: JSON.stringify({ url }) },
+      ),
+    click: (sessionId: string, selector: string) =>
+      request<{ session_id: string; selector: string; mock_mode: boolean; result: unknown }>(
+        `/browser/session/${encodeURIComponent(sessionId)}/click`,
+        { method: "POST", body: JSON.stringify({ selector }) },
+      ),
+    type: (sessionId: string, selector: string, text: string) =>
+      request<{ session_id: string; selector: string; length: number; mock_mode: boolean; result: unknown }>(
+        `/browser/session/${encodeURIComponent(sessionId)}/type`,
+        { method: "POST", body: JSON.stringify({ selector, text }) },
+      ),
+    extract: (sessionId: string, selector: string) =>
+      request<{ session_id: string; selector: string; text: string; mock_mode: boolean; result: unknown }>(
+        `/browser/session/${encodeURIComponent(sessionId)}/extract`,
+        { method: "POST", body: JSON.stringify({ selector }) },
+      ),
+    screenshot: (sessionId: string) =>
+      request<{ session_id: string; mock_mode: boolean; result: unknown }>(
+        `/browser/session/${encodeURIComponent(sessionId)}/screenshot`,
+        { method: "POST" },
+      ),
+  },
+
+  // ---- Files (master prompt §18, §55 File Security) ----
+  // Every path goes through the backend _validate_path allowlist. Blocked
+  // paths (/etc, /usr, C:/Windows etc.) return 403. file.delete is CRITICAL
+  // risk — pass approved=true after the user confirms.
+  files: {
+    list: (path: string, pattern = "*") =>
+      request<{ path: string; count: number; entries: unknown[]; mock_mode: boolean }>(
+        `/files/list?path=${encodeURIComponent(path)}&pattern=${encodeURIComponent(pattern)}`,
+      ),
+    read: (path: string, encoding = "utf-8", maxBytes = 1_048_576) =>
+      request<{ path: string; size: number; text: string; encoding: string; mock_mode: boolean }>(
+        `/files/read?path=${encodeURIComponent(path)}&encoding=${encodeURIComponent(encoding)}&max_bytes=${maxBytes}`,
+      ),
+    write: (path: string, content: string, encoding = "utf-8") =>
+      request<{ path: string; size: number; mock_mode: boolean }>("/files/write", {
+        method: "POST",
+        body: JSON.stringify({ path, content, encoding }),
+      }),
+    move: (source: string, destination: string) =>
+      request<{ source: string; destination: string; mock_mode: boolean }>("/files/move", {
+        method: "POST",
+        body: JSON.stringify({ source, destination }),
+      }),
+    rename: (path: string, newName: string) =>
+      request<{ old: string; new: string; mock_mode: boolean }>("/files/rename", {
+        method: "POST",
+        body: JSON.stringify({ path, new_name: newName }),
+      }),
+    copy: (source: string, destination: string) =>
+      request<{ source: string; destination: string; size: number; mock_mode: boolean }>("/files/copy", {
+        method: "POST",
+        body: JSON.stringify({ source, destination }),
+      }),
+    delete: (path: string, approved: boolean) =>
+      request<{ path: string; deleted: boolean; mock_mode: boolean }>("/files/delete", {
+        method: "POST",
+        body: JSON.stringify({ path, approved }),
+      }),
+    download: (path: string): Promise<Blob> =>
+      fetch(`${BASE_URL}/files/download?path=${encodeURIComponent(path)}`).then((r) => {
+        if (!r.ok) {
+          return r
+            .json()
+            .catch(() => ({ detail: r.statusText }))
+            .then((body) => {
+              throw new Error(`${r.status}: ${body.detail || "download failed"}`);
+            });
+        }
+        return r.blob();
+      }),
+  },
+
+  // ---- History (master prompt §36) ----
+  // Task history pulled from the SQLAlchemy tasks / task_steps / task_logs /
+  // screenshots / automation_history tables. Returns empty lists when the
+  // DB is unavailable (mock mode) so the UI renders an empty state.
+  history: {
+    listTasks: (params?: {
+      limit?: number;
+      offset?: number;
+      status?: string;
+      date_from?: string;
+      date_to?: string;
+      search?: string;
+    }) => {
+      const qs = new URLSearchParams();
+      if (params?.limit !== undefined) qs.set("limit", String(params.limit));
+      if (params?.offset !== undefined) qs.set("offset", String(params.offset));
+      if (params?.status) qs.set("status", params.status);
+      if (params?.date_from) qs.set("date_from", params.date_from);
+      if (params?.date_to) qs.set("date_to", params.date_to);
+      if (params?.search) qs.set("search", params.search);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return request<{
+        tasks: Array<{
+          id: string;
+          name: string;
+          status: string;
+          profile_id?: string | null;
+          started_at?: string | null;
+          finished_at?: string | null;
+          created_at?: string | null;
+        }>;
+        count: number;
+        limit: number;
+        offset: number;
+        mock_mode: boolean;
+      }>(`/history/tasks${suffix}`);
+    },
+    getTask: (taskId: string) =>
+      request<{ task: unknown; steps: unknown[]; logs: unknown[]; mock_mode: boolean }>(
+        `/history/tasks/${encodeURIComponent(taskId)}`,
+      ),
+    getTaskScreenshots: (taskId: string) =>
+      request<{ screenshots: unknown[]; count: number; mock_mode: boolean }>(
+        `/history/tasks/${encodeURIComponent(taskId)}/screenshots`,
+      ),
+    getTaskLogs: (taskId: string) =>
+      request<{ logs: unknown[]; count: number; mock_mode: boolean }>(
+        `/history/tasks/${encodeURIComponent(taskId)}/logs`,
+      ),
+    rerunTask: (taskId: string) =>
+      request<{ task_id: string; new_run_id: string | null; started: boolean; mock_mode: boolean }>(
+        `/history/tasks/${encodeURIComponent(taskId)}/rerun`,
+        { method: "POST" },
+      ),
+    export: (params?: {
+      status?: string;
+      date_from?: string;
+      date_to?: string;
+      search?: string;
+    }): Promise<Blob> => {
+      const qs = new URLSearchParams();
+      if (params?.status) qs.set("status", params.status);
+      if (params?.date_from) qs.set("date_from", params.date_from);
+      if (params?.date_to) qs.set("date_to", params.date_to);
+      if (params?.search) qs.set("search", params.search);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return fetch(`${BASE_URL}/history/export${suffix}`).then((r) => {
+        if (!r.ok) {
+          return r
+            .json()
+            .catch(() => ({ detail: r.statusText }))
+            .then((body) => {
+              throw new Error(`${r.status}: ${body.detail || "export failed"}`);
+            });
+        }
+        return r.blob();
+      });
+    },
+  },
+
+  // ---- AI Models + Providers + Credentials (master prompt §6, §28, §57) ----
+  // 52 AI providers. Credentials are stored in the OS keyring (never
+  // returned in API responses — only the has_credential flag is exposed).
+  aiModels: {
+    list: (provider?: string) => {
+      const qs = new URLSearchParams();
+      if (provider) qs.set("provider", provider);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return request<{ models: unknown[]; count: number; provider: string | null; mock_mode: boolean }>(
+        `/ai-models${suffix}`,
+      );
+    },
+    sync: (provider?: string) => {
+      const qs = new URLSearchParams();
+      if (provider) qs.set("provider", provider);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return request<{ synced: Record<string, number>; mock_mode: boolean }>(
+        `/ai-models/sync${suffix}`,
+        { method: "POST" },
+      );
+    },
+    listProviders: () =>
+      request<{
+        providers: Array<{
+          name: string;
+          display_name: string;
+          base_url: string | null;
+          env_key: string | null;
+          default_model: string;
+          openai_compatible: boolean;
+          supports_model_list: boolean;
+          docs_url: string;
+          notes: string;
+          has_credential: boolean;
+        }>;
+        count: number;
+        default_provider: string;
+        default_model: string;
+        mock_mode: boolean;
+      }>("/providers"),
+    testProvider: (name: string) =>
+      request<{ provider: string; ok: boolean; message: string; mock_mode: boolean }>(
+        `/providers/test/${encodeURIComponent(name)}`,
+        { method: "POST" },
+      ),
+    addCredential: (service: string, value: string) =>
+      request<{ service: string; stored: boolean; mock_mode: boolean }>("/credentials", {
+        method: "POST",
+        body: JSON.stringify({ service, value }),
+      }),
+    removeCredential: (service: string) =>
+      request<{ service: string; removed: boolean; mock_mode: boolean }>(
+        `/credentials/${encodeURIComponent(service)}`,
+        { method: "DELETE" },
+      ),
+    listCredentials: () =>
+      request<{
+        credentials: Array<{
+          service: string;
+          has_credential: boolean;
+          preview: string | null;
+        }>;
+        count: number;
+        mock_mode: boolean;
+      }>("/credentials"),
+  },
+
+  // ---- Permissions (master prompt §9, §10, §55, §88) ----
+  // Risk levels: low / medium / high / critical. Decisions: allow_once /
+  // allow_for_workflow / always_allow. The policy endpoint exposes rate
+  // limits + per-tool risk overrides (persisted to config/risk_overrides.json).
+  permissions: {
+    list: (profileId?: string) => {
+      const qs = new URLSearchParams();
+      if (profileId) qs.set("profile_id", profileId);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return request<{ grants: Array<{ grant_id: string; tool: string; risk: string; decision: string; profile_id: string | null }>; count: number }>(
+        `/permissions${suffix}`,
+      );
+    },
+    grant: (body: { tool_name: string; risk_level: RiskLevel; decision?: string; profile_id?: string }) =>
+      request<{ grant_id: string; tool_name: string; risk_level: string; decision: string; profile_id: string | null; granted: boolean }>(
+        "/permissions",
+        { method: "POST", body: JSON.stringify(body) },
+      ),
+    revoke: (grantId: string) =>
+      request<{ grant_id: string; revoked: boolean }>(
+        `/permissions/${encodeURIComponent(grantId)}`,
+        { method: "DELETE" },
+      ),
+    riskLevels: () =>
+      request<{
+        levels: Array<{
+          value: string;
+          label: string;
+          color: string;
+          description: string;
+          examples: string[];
+        }>;
+        count: number;
+      }>("/permissions/risk-levels"),
+    getPolicy: () =>
+      request<{
+        max_actions_per_minute: number;
+        max_ai_calls_per_task: number;
+        max_loops: number;
+        max_file_operations: number;
+        max_browser_tabs: number;
+        risk_overrides: Record<string, string>;
+      }>("/permissions/policy"),
+    updatePolicy: (body: {
+      max_actions_per_minute?: number;
+      max_ai_calls_per_task?: number;
+      max_loops?: number;
+      max_file_operations?: number;
+      max_browser_tabs?: number;
+      risk_overrides?: Record<string, string>;
+    }) =>
+      request<{
+        max_actions_per_minute: number;
+        max_ai_calls_per_task: number;
+        max_loops: number;
+        max_file_operations: number;
+        max_browser_tabs: number;
+        risk_overrides: Record<string, string>;
+      }>("/permissions/policy", {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+  },
+
+  // ---- Schedules (master prompt §24, §25) ----
+  // Wraps the existing /schedules endpoints. Each schedule maps a workflow
+  // to a trigger (schedule / file / application / browser / hotkey / webhook
+  // / system / manual).
+  schedules: {
+    list: () =>
+      request<Array<{ job_id: string; workflow_id: string | null; trigger_type: string; next_run_time: string | null; is_active: boolean | null }>>("/schedules"),
+    triggers: () =>
+      request<Array<{ type: string; description: string; required_fields: string[] }>>(
+        "/schedules/triggers/types",
+      ),
+    create: (body: { workflow_id: string; trigger_config: Record<string, unknown> }) =>
+      request<{ job_id: string }>("/schedules", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    remove: (jobId: string) =>
+      request<{ job_id: string; unscheduled: boolean }>(
+        `/schedules/${encodeURIComponent(jobId)}`,
+        { method: "DELETE" },
+      ),
+    pause: (jobId: string) =>
+      request<{ job_id: string; paused: boolean }>(
+        `/schedules/${encodeURIComponent(jobId)}/pause`,
+        { method: "POST" },
+      ),
+    resume: (jobId: string) =>
+      request<{ job_id: string; resumed: boolean }>(
+        `/schedules/${encodeURIComponent(jobId)}/resume`,
+        { method: "POST" },
+      ),
+  },
 };

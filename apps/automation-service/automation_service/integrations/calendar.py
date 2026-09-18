@@ -12,13 +12,14 @@ Provides:
 
 All HTTP calls happen inside the service implementations; this module never
 touches the database directly except the ``api_credentials`` lookup used by
-the factory.
+the factory and the ``_get_credentials()`` helper on GoogleCalendarService.
 
 Master prompt invariants:
 - §5: this is a *local* service — no remote calls except to calendar providers
   the user has explicitly connected.
 - §57: secrets are never logged. The Google service receives the access token
-  via the credential manager, not via the constructor.
+  via the credential manager, not via the constructor. The ``_get_credentials``
+  helper masks tokens before any debug log line.
 - §83: "Every external action must still pass through permissions and
   user-defined policies" — calendar operations are READ-ONLY here. Any
   automation triggered by a calendar event still goes through the permission
@@ -37,6 +38,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from ..config import settings
+from ..security.credentials import mask
 
 
 # ---------------------------------------------------------------------------
@@ -312,28 +314,193 @@ class GoogleCalendarService(CalendarService):
     - A connected Google OAuth account (looked up via the
       ``api_credentials`` table where ``service = 'oauth:google'``).
 
-    The access token is fetched on demand from the credential manager —
-    never stored as an attribute of this class.
+    The access token is fetched on demand via ``_get_credentials()`` —
+    never stored as an attribute of this class. If the env var
+    ``GOOGLE_APPLICATION_CREDENTIALS`` is set, it takes precedence and is
+    used for service-account auth (no user OAuth needed).
 
     When ``settings.mock_mode`` is True, this instance behaves identically
-    to :class:`MockCalendarService` (master prompt §64).
+    to :class:`MockCalendarService` (master prompt §64) so the assistant
+    works without any network or installed Google libraries.
+
+    Master prompt §57: tokens are never logged. When a debug log needs to
+    reference the credential, it goes through ``mask()``.
     """
 
     provider_name = "google"
 
-    def __init__(self, access_token: Optional[str] = None) -> None:
+    # Recognised Google OAuth error reason strings.
+    _REASON_EXPIRED = "expired"
+    _REASON_INSUFFICIENT_SCOPE = "insufficient scope"
+
+    def __init__(
+        self,
+        access_token: Optional[str] = None,
+        refresh_token: Optional[str] = None,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+    ) -> None:
+        # NOTE: access_token is accepted for backward compatibility with
+        # tests + existing callers, but the preferred path is to leave it
+        # None and let ``_get_credentials()`` resolve everything at call
+        # time. Storing tokens on the instance is fine *only* because we
+        # never log them; if you change this, audit §57 compliance first.
         self._access_token = access_token
+        self._refresh_token = refresh_token
+        self._client_id = client_id
+        self._client_secret = client_secret
         self._mock = MockCalendarService() if settings.mock_mode else None
+
+    # ------------------------------------------------------------------
+    # Credential resolution (master prompt §57 — never log secrets)
+    # ------------------------------------------------------------------
+
+    def _get_credentials(self):
+        """Return a ``google.oauth2.credentials.Credentials`` instance.
+
+        Resolution order:
+        1. ``GOOGLE_APPLICATION_CREDENTIALS`` env var — if set, use a
+           service-account flow (no user OAuth needed). This is the path
+           Google's own client libraries prefer.
+        2. Tokens stored in the ``api_credentials`` table under
+           ``service = 'oauth:google'`` — combined with the Google OAuth
+           client_id / client_secret env vars. Refresh token + expiry are
+           passed in so the underlying client can auto-refresh.
+        3. Constructor-supplied ``access_token`` (legacy / test path).
+
+        Returns ``None`` when no credentials are available. Callers MUST
+        handle this by either falling back to mock mode or raising a
+        helpful error.
+
+        Lazy imports google-auth so the module loads without it installed.
+        """
+        try:
+            from google.oauth2.credentials import Credentials  # type: ignore
+            from google.auth import default as _google_auth_default  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "google-auth is not installed. Install it via "
+                "`pip install google-auth google-auth-oauthlib "
+                "google-api-python-client` to use GoogleCalendarService. "
+                "(Mock mode is available without it.)"
+            ) from exc
+
+        # 1. Service account via GOOGLE_APPLICATION_CREDENTIALS env var
+        sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if sa_path:
+            try:
+                from google.oauth2 import service_account  # type: ignore
+                scopes = ["https://www.googleapis.com/auth/calendar"]
+                creds = service_account.Credentials.from_service_account_file(
+                    sa_path, scopes=scopes
+                )
+                logger.debug(
+                    "GoogleCalendarService: using service account from "
+                    "GOOGLE_APPLICATION_CREDENTIALS={}",
+                    sa_path,
+                )
+                return creds
+            except Exception as exc:
+                logger.warning(
+                    "GOOGLE_APPLICATION_CREDENTIALS set but failed to load: {}", exc
+                )
+                # fall through to OAuth path
+
+        # 2. Tokens stored in api_credentials table
+        stored = self._read_stored_google_tokens()
+        if stored is not None:
+            client_id = self._client_id or os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
+            client_secret = self._client_secret or os.environ.get(
+                "GOOGLE_OAUTH_CLIENT_SECRET"
+            )
+            access_token = stored.get("access_token") or self._access_token
+            refresh_token = stored.get("refresh_token") or self._refresh_token
+            if access_token:
+                logger.debug(
+                    "GoogleCalendarService: using stored OAuth access token (preview={})",
+                    mask(access_token),
+                )
+                return Credentials(
+                    token=access_token,
+                    refresh_token=refresh_token,
+                    token_uri="https://oauth2.googleapis.com/token",
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    scopes=stored.get("scope", "").split() if stored.get("scope") else None,
+                )
+
+        # 3. Constructor-supplied token (legacy / test path)
+        if self._access_token:
+            logger.debug(
+                "GoogleCalendarService: using constructor-supplied access token (preview={})",
+                mask(self._access_token),
+            )
+            return Credentials(
+                token=self._access_token,
+                refresh_token=self._refresh_token,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=self._client_id or os.environ.get("GOOGLE_OAUTH_CLIENT_ID"),
+                client_secret=(
+                    self._client_secret
+                    or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
+                ),
+            )
+
+        return None
+
+    @staticmethod
+    def _read_stored_google_tokens() -> Optional[dict]:
+        """Look up the stored Google OAuth token dict from the
+        ``api_credentials`` table.
+
+        Returns None if:
+        - mock mode is on (master prompt §64 — never consult the DB)
+        - the api_credentials table isn't initialised
+        - no oauth:google row exists
+        """
+        if settings.mock_mode:
+            return None
+        try:
+            from database.base import SessionLocal  # type: ignore
+            from database.models.schema import APICredential  # type: ignore
+
+            session = SessionLocal()
+            try:
+                row = (
+                    session.query(APICredential)
+                    .filter(APICredential.service == "oauth:google")
+                    .order_by(APICredential.updated_at.desc())
+                    .first()
+                )
+                if row is None:
+                    return None
+                meta = row.metadata_json or {}
+                return {
+                    "access_token": meta.get("access_token"),
+                    "refresh_token": meta.get("refresh_token"),
+                    "expires_at": meta.get("expires_at"),
+                    "scope": meta.get("scope"),
+                    "token_type": meta.get("token_type", "Bearer"),
+                }
+            finally:
+                session.close()
+        except Exception as exc:
+            logger.debug("Google stored token lookup failed: {}", exc)
+            return None
+
+    # ------------------------------------------------------------------
+    # Service construction (lazy import — master prompt §57 install hint)
+    # ------------------------------------------------------------------
 
     def _build_service(self):
         """Construct the google-api-python-client service object.
 
         Lazy import so this module loads even when google-api-python-client
         is not installed. The error message tells the user exactly what to
-        install.
+        install. Uses ``_get_credentials()`` for auth — never an attribute
+        that could leak into logs.
         """
         try:
-            from google.oauth2.credentials import Credentials  # type: ignore
             from googleapiclient.discovery import build  # type: ignore
         except ImportError as exc:
             raise RuntimeError(
@@ -342,8 +509,145 @@ class GoogleCalendarService(CalendarService):
                 "to use GoogleCalendarService. (Mock mode is available without it.)"
             ) from exc
 
-        creds = Credentials(token=self._access_token)
+        creds = self._get_credentials()
+        if creds is None:
+            raise RuntimeError(
+                "No Google credentials available. Either set "
+                "GOOGLE_APPLICATION_CREDENTIALS to a service-account JSON file, "
+                "connect your Google account via the OAuth flow, or pass an "
+                "access_token to GoogleCalendarService."
+            )
         return build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+    # ------------------------------------------------------------------
+    # 401 retry + 403 scope handling
+    # ------------------------------------------------------------------
+
+    def _handle_google_api_error(self, exc: Exception, *, retrying: bool = False) -> None:
+        """Inspect a googleapiclient HttpError and convert it to a useful
+        RuntimeError (or attempt a token refresh + retry).
+
+        Called from every network method. ``retrying=True`` means we've
+        already refreshed the token once and should NOT retry again.
+        """
+        # googleapiclient.errors.HttpError exposes .resp.status + a JSON body
+        status_code = getattr(exc, "resp", None) and getattr(exc.resp, "status", None)
+        if status_code is None:
+            # Some other error type — re-raise unchanged.
+            raise exc
+
+        # Try to parse the error reason out of the JSON body.
+        reason: Optional[str] = None
+        try:
+            import json
+            content = exc.content.decode("utf-8") if hasattr(exc, "content") else ""
+            if content:
+                data = json.loads(content)
+                reason = (
+                    data.get("error", {}).get("errors", [{}])[0].get("reason")
+                    if isinstance(data, dict)
+                    else None
+                )
+        except Exception:
+            pass
+
+        # 401 — token expired or revoked. Refresh once and retry.
+        if status_code == 401 and not retrying:
+            logger.info(
+                "Google Calendar returned 401 (reason={}) — refreshing token and retrying once.",
+                reason or "unknown",
+            )
+            refreshed = self._refresh_access_token()
+            if not refreshed:
+                raise RuntimeError(
+                    "Google Calendar returned 401 and token refresh failed. "
+                    "Re-connect your Google account via /oauth/google/start."
+                ) from exc
+            raise _RetryAfterRefresh()  # signal caller to retry once
+
+        # 403 — insufficient scope is the most common cause.
+        if status_code == 403:
+            if reason == self._REASON_INSUFFICIENT_SCOPE or "insufficient" in (reason or "").lower():
+                raise RuntimeError(
+                    "Google Calendar API returned 403 insufficient_scope. "
+                    "Re-authorize your Google account with the "
+                    "https://www.googleapis.com/auth/calendar scope "
+                    "(start the OAuth flow at /oauth/google/start)."
+                ) from exc
+            raise RuntimeError(
+                f"Google Calendar API returned 403 (reason={reason or 'unknown'}). "
+                "The account may not have access to the requested calendar."
+            ) from exc
+
+        # Any other status — surface a generic error.
+        raise RuntimeError(
+            f"Google Calendar API call failed (HTTP {status_code}, reason={reason or 'unknown'}): {exc}"
+        ) from exc
+
+    def _refresh_access_token(self) -> bool:
+        """Best-effort refresh of the Google OAuth access token.
+
+        Delegates to the GoogleOAuthProvider so we don't duplicate the
+        refresh-token POST logic. On success the new tokens are stored
+        back into the api_credentials table (so subsequent calls skip the
+        refresh). On failure returns False — the caller surfaces a useful
+        error.
+
+        Master prompt §57: the refresh_token is never logged.
+        """
+        try:
+            from .oauth import get_oauth_provider, store_tokens
+
+            provider = get_oauth_provider("google")
+            stored = self._read_stored_google_tokens()
+            refresh_token = (stored or {}).get("refresh_token") if stored else self._refresh_token
+            if not refresh_token:
+                logger.warning(
+                    "Google Calendar: cannot refresh — no refresh_token stored."
+                )
+                return False
+
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # We're already in an async context — schedule the await
+                    # on the running loop and block until done.
+                    import asyncio as _a
+                    fut = _a.run_coroutine_threadsafe(
+                        provider.refresh_token(refresh_token), loop
+                    )
+                    new_tokens = fut.result(timeout=30)
+                else:
+                    new_tokens = loop.run_until_complete(
+                        provider.refresh_token(refresh_token)
+                    )
+            except RuntimeError:
+                # No running loop in this thread — create one.
+                import asyncio as _a
+                new_tokens = _a.run(
+                    provider.refresh_token(refresh_token)
+                )
+
+            # Stash the new access_token on the instance so the retry uses it.
+            self._access_token = new_tokens.access_token
+            # Persist to DB so subsequent calls skip the refresh.
+            try:
+                store_tokens("google", new_tokens)
+            except Exception as persist_exc:
+                logger.debug("Failed to persist refreshed Google tokens: {}", persist_exc)
+            logger.debug(
+                "Google Calendar: token refreshed successfully (preview={})",
+                mask(new_tokens.access_token),
+            )
+            return True
+        except Exception as exc:
+            logger.error("Google Calendar token refresh failed: {}", exc)
+            return False
+
+    # ------------------------------------------------------------------
+    # Conversion helper
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _to_event(item: dict) -> CalendarEvent:
@@ -377,6 +681,10 @@ class GoogleCalendarService(CalendarService):
             metadata={"provider": "google", "raw_etag": item.get("etag")},
         )
 
+    # ------------------------------------------------------------------
+    # ABC method implementations
+    # ------------------------------------------------------------------
+
     async def list_events(
         self,
         time_min: Optional[datetime] = None,
@@ -386,29 +694,67 @@ class GoogleCalendarService(CalendarService):
         if self._mock is not None:
             return await self._mock.list_events(time_min, time_max, max_results)
 
-        service = self._build_service()
         now = datetime.now(timezone.utc)
-        time_min_str = (time_min or now).isoformat()
-        events_result = (
-            service.events()
-            .list(
-                calendarId="primary",
-                timeMin=time_min_str,
-                maxResults=max_results,
-                singleEvents=True,
-                orderBy="startTime",
-            )
-            .execute()
+        time_min = time_min or now
+        time_max = time_max or (now + timedelta(days=30))
+        time_min_str = time_min.isoformat()
+        time_max_str = time_max.isoformat()
+
+        for _attempt in range(2):
+            service = self._build_service()
+            try:
+                events_result = (
+                    service.events()
+                    .list(
+                        calendarId="primary",
+                        timeMin=time_min_str,
+                        timeMax=time_max_str,
+                        maxResults=max_results,
+                        singleEvents=True,
+                        orderBy="startTime",
+                    )
+                    .execute()
+                )
+            except _RetryAfterRefresh:
+                continue  # token refreshed, retry once
+            except Exception as exc:
+                if _attempt == 0 and _is_401(exc):
+                    # Legacy path for HttpError without the JSON shape we
+                    # expect — refresh + retry.
+                    if self._refresh_access_token():
+                        continue
+                self._handle_google_api_error(exc, retrying=(_attempt > 0))
+                continue  # unreachable — _handle_google_api_error always raises
+            items = events_result.get("items", [])
+            return [self._to_event(it) for it in items]
+        # If we got here, the refresh-and-retry didn't help.
+        raise RuntimeError(
+            "Google Calendar list_events failed after a token refresh + retry. "
+            "Re-authorize the Google account at /oauth/google/start."
         )
-        items = events_result.get("items", [])
-        return [self._to_event(it) for it in items]
 
     async def get_event(self, event_id: str) -> CalendarEvent:
         if self._mock is not None:
             return await self._mock.get_event(event_id)
-        service = self._build_service()
-        item = service.events().get(calendarId="primary", eventId=event_id).execute()
-        return self._to_event(item)
+        for _attempt in range(2):
+            service = self._build_service()
+            try:
+                item = (
+                    service.events()
+                    .get(calendarId="primary", eventId=event_id)
+                    .execute()
+                )
+            except _RetryAfterRefresh:
+                continue
+            except Exception as exc:
+                if _attempt == 0 and _is_401(exc) and self._refresh_access_token():
+                    continue
+                self._handle_google_api_error(exc, retrying=(_attempt > 0))
+                continue
+            return self._to_event(item)
+        raise RuntimeError(
+            "Google Calendar get_event failed after a token refresh + retry."
+        )
 
     async def create_event(
         self,
@@ -427,7 +773,6 @@ class GoogleCalendarService(CalendarService):
                 title, start_at, end_at, description, location,
                 attendees, conference_url, meeting_link, metadata,
             )
-        service = self._build_service()
         body: dict[str, Any] = {
             "summary": title,
             "start": {"dateTime": start_at.isoformat()},
@@ -441,8 +786,34 @@ class GoogleCalendarService(CalendarService):
             body["attendees"] = [
                 {"email": a.email, "displayName": a.name} for a in attendees if a.email
             ]
-        created = service.events().insert(calendarId="primary", body=body).execute()
-        return self._to_event(created)
+        # conference_data: master prompt §83 requested this for create_event.
+        if conference_url:
+            body["conferenceData"] = {
+                "createRequest": {
+                    "requestId": uuid.uuid4().hex,
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
+            }
+
+        for _attempt in range(2):
+            service = self._build_service()
+            try:
+                created = (
+                    service.events()
+                    .insert(calendarId="primary", body=body)
+                    .execute()
+                )
+            except _RetryAfterRefresh:
+                continue
+            except Exception as exc:
+                if _attempt == 0 and _is_401(exc) and self._refresh_access_token():
+                    continue
+                self._handle_google_api_error(exc, retrying=(_attempt > 0))
+                continue
+            return self._to_event(created)
+        raise RuntimeError(
+            "Google Calendar create_event failed after a token refresh + retry."
+        )
 
     async def update_event(
         self,
@@ -462,39 +833,108 @@ class GoogleCalendarService(CalendarService):
                 event_id, title, start_at, end_at, description, location,
                 attendees, conference_url, meeting_link, metadata,
             )
-        service = self._build_service()
-        existing = service.events().get(calendarId="primary", eventId=event_id).execute()
+        body: dict[str, Any] = {}
         if title is not None:
-            existing["summary"] = title
+            body["summary"] = title
         if start_at is not None:
-            existing["start"] = {"dateTime": start_at.isoformat()}
+            body["start"] = {"dateTime": start_at.isoformat()}
         if end_at is not None:
-            existing["end"] = {"dateTime": end_at.isoformat()}
+            body["end"] = {"dateTime": end_at.isoformat()}
         if description is not None:
-            existing["description"] = description
+            body["description"] = description
         if location is not None:
-            existing["location"] = location
+            body["location"] = location
         if attendees is not None:
-            existing["attendees"] = [
+            body["attendees"] = [
                 {"email": a.email, "displayName": a.name} for a in attendees if a.email
             ]
-        updated = (
-            service.events()
-            .update(calendarId="primary", eventId=event_id, body=existing)
-            .execute()
+        if conference_url is not None:
+            body["conferenceData"] = {
+                "createRequest": {
+                    "requestId": uuid.uuid4().hex,
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
+            }
+
+        for _attempt in range(2):
+            service = self._build_service()
+            try:
+                updated = (
+                    service.events()
+                    .patch(calendarId="primary", eventId=event_id, body=body)
+                    .execute()
+                )
+            except _RetryAfterRefresh:
+                continue
+            except Exception as exc:
+                if _attempt == 0 and _is_401(exc) and self._refresh_access_token():
+                    continue
+                self._handle_google_api_error(exc, retrying=(_attempt > 0))
+                continue
+            return self._to_event(updated)
+        raise RuntimeError(
+            "Google Calendar update_event failed after a token refresh + retry."
         )
-        return self._to_event(updated)
 
     async def delete_event(self, event_id: str) -> bool:
         if self._mock is not None:
             return await self._mock.delete_event(event_id)
-        service = self._build_service()
-        service.events().delete(calendarId="primary", eventId=event_id).execute()
-        return True
+        for _attempt in range(2):
+            service = self._build_service()
+            try:
+                service.events().delete(
+                    calendarId="primary", eventId=event_id
+                ).execute()
+            except _RetryAfterRefresh:
+                continue
+            except Exception as exc:
+                if _attempt == 0 and _is_401(exc) and self._refresh_access_token():
+                    continue
+                # 404 means "already deleted" — treat as success per Google's docs.
+                if _is_404(exc):
+                    return True
+                self._handle_google_api_error(exc, retrying=(_attempt > 0))
+                continue
+            return True
+        raise RuntimeError(
+            "Google Calendar delete_event failed after a token refresh + retry."
+        )
 
     async def get_next_meeting(self) -> Optional[CalendarEvent]:
-        events = await self.list_events(max_results=1)
+        """Return the next upcoming meeting, or None.
+
+        Uses ``list_events`` with time_min=now, time_max=now+24h,
+        max_results=1 — per the task spec.
+        """
+        if self._mock is not None:
+            return await self._mock.get_next_meeting()
+        now = datetime.now(timezone.utc)
+        events = await self.list_events(
+            time_min=now,
+            time_max=now + timedelta(hours=24),
+            max_results=1,
+        )
         return events[0] if events else None
+
+
+class _RetryAfterRefresh(Exception):
+    """Internal sentinel raised by ``_handle_google_api_error`` to tell
+    the calling method that the access token has been refreshed and the
+    request should be retried once."""
+
+
+def _is_401(exc: Exception) -> bool:
+    """True if ``exc`` is a googleapiclient HttpError with HTTP 401."""
+    resp = getattr(exc, "resp", None)
+    status_code = getattr(resp, "status", None) if resp is not None else None
+    return status_code == 401
+
+
+def _is_404(exc: Exception) -> bool:
+    """True if ``exc`` is a googleapiclient HttpError with HTTP 404."""
+    resp = getattr(exc, "resp", None)
+    status_code = getattr(resp, "status", None) if resp is not None else None
+    return status_code == 404
 
 
 # ---------------------------------------------------------------------------

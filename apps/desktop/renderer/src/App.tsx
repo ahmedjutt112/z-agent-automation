@@ -17,6 +17,13 @@ import { Logs } from "./pages/Logs";
 import { Settings } from "./pages/Settings";
 import { Integrations } from "./pages/Integrations";
 import { VoiceSettings } from "./pages/VoiceSettings";
+import { Recorder } from "./pages/Recorder";
+import { Browser } from "./pages/Browser";
+import { Files } from "./pages/Files";
+import { Schedules } from "./pages/Schedules";
+import { History } from "./pages/History";
+import { AIModels } from "./pages/AIModels";
+import { Permissions } from "./pages/Permissions";
 import { EmergencyBanner } from "./components/EmergencyBanner";
 import { useStore } from "./store";
 
@@ -73,6 +80,13 @@ function renderView(view: string): React.ReactNode {
     case "integrations": return <Integrations />;
     case "voice-settings": return <VoiceSettings />;
     case "settings": return <Settings />;
+    case "recorder": return <Recorder />;
+    case "browser": return <Browser />;
+    case "files": return <Files />;
+    case "schedules": return <Schedules />;
+    case "history": return <History />;
+    case "ai-models": return <AIModels />;
+    case "permissions": return <Permissions />;
     default: return <Dashboard />;
   }
 }

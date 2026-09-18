@@ -1,0 +1,92 @@
+# Electron Builder configuration for the AI Automation Agent desktop app.
+#
+# All paths are relative to apps/desktop/ (the directory containing
+# package.json). `extraResources` references walk UP to the monorepo root via
+# ../../ so the packaged app bundles the Python automation-service, the
+# shared database package, plugins, and helper scripts.
+#
+# Run via:
+#   npm run dist          # current-platform installer
+#   npm run dist:win      # Windows NSIS (x64 + arm64)
+#   npm run dist:mac      # macOS DMG (x64 + arm64)
+#   npm run dist:linux    # Linux AppImage (x64 + arm64)
+#   npm run release       # current platform + publish to GitHub Releases
+#
+# Auto-update: this config declares `publish.provider: github`. The Python
+# backend UpdateManager (automation_service/update/manager.py) is the source
+# of truth for update verification + rollback; electron-builder's
+# autoUpdater is intentionally NOT wired into the main process — the
+# backend orchestrates updates so it can verify signatures and roll back
+# atomically per master prompt §90.
+
+appId: com.z-agent.automation
+productName: AI Automation Agent
+copyright: Copyright © 2026 Z User
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist-electron/**/*
+  - renderer/dist/**/*
+  - package.json
+  - "!**/.vscode/*"
+  - "!**/.pytest_cache/*"
+  - "!**/__pycache__/*"
+
+extraResources:
+  - from: ../../apps/automation-service
+    to: automation-service
+    filter: ["**/*", "!**/__pycache__/*", "!**/*.pyc", "!**/.pytest_cache/*"]
+  - from: ../../database
+    to: database
+    filter: ["**/*", "!**/__pycache__/*"]
+  - from: ../../plugins
+    to: plugins
+  - from: ../../scripts
+    to: scripts
+
+win:
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+  icon: build/icon.ico
+
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  icon: build/icon.icns
+  category: public.app-category.productivity
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64, arm64]
+  icon: build/icon.png
+  category: Office
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AI Automation Agent
+
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+publish:
+  provider: github
+  owner: babyline00
+  repo: z-agent-automation
+  releaseType: release
