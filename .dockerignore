@@ -1,0 +1,116 @@
+# ============================================================================
+# .dockerignore — files excluded from the Docker build context
+# ----------------------------------------------------------------------------
+# Reduces the context size dramatically (the skills/ folder alone is ~50 MB)
+# AND prevents secrets / locally-cached state from leaking into the image.
+#
+# Anything matched here is NOT included when `docker build` / `docker compose
+# build` snapshots the context, so `COPY` in the Dockerfile cannot reference
+# them either.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Secrets — NEVER bake these into an image
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ---------------------------------------------------------------------------
+# Python build artifacts
+# ---------------------------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# ---------------------------------------------------------------------------
+# Local virtualenv — the Docker image builds its own venv via uv sync
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+
+# ---------------------------------------------------------------------------
+# Skills catalog — 50+ ClawHub skills, ~50 MB. Not needed at runtime; the
+# automation service loads them lazily from a mount if required.
+# ---------------------------------------------------------------------------
+skills/
+
+# ---------------------------------------------------------------------------
+# Node / Electron — the frontend Dockerfile rebuilds node_modules from
+# package-lock.json inside the builder stage.
+# ---------------------------------------------------------------------------
+node_modules/
+apps/desktop/node_modules/
+apps/desktop/release/
+apps/desktop/renderer/dist/
+apps/desktop/dist-electron/
+
+# ---------------------------------------------------------------------------
+# VCS + CI — never ship .git history or workflow definitions to runtime
+# ---------------------------------------------------------------------------
+.git/
+.gitignore
+.github/
+.gitlab-ci.yml
+
+# ---------------------------------------------------------------------------
+# Runtime scratch dirs — created fresh inside the container at boot
+# ---------------------------------------------------------------------------
+tool-results/
+upload/
+logs/
+download/screenshots/
+backups/
+db/*.db
+db/*.db-journal
+db/*.db-wal
+db/*.db-shm
+
+# ---------------------------------------------------------------------------
+# Docs + meta — not used at runtime; they bloat the context.
+# ---------------------------------------------------------------------------
+README.md
+CONTRIBUTING.md
+LICENSE
+worklog.md
+AGENTS.md
+
+# ---------------------------------------------------------------------------
+# Alembic — migrations are run from the host (make db-migrate), NOT inside
+# the container (the Dockerfile CMD is uvicorn-only).
+# ---------------------------------------------------------------------------
+alembic.ini
+
+# ---------------------------------------------------------------------------
+# Misc — IDE / OS clutter
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# ---------------------------------------------------------------------------
+# Docker meta — don't recurse into the Dockerfile's own context
+# ---------------------------------------------------------------------------
+Dockerfile
+.dockerignore
+docker-compose.yml

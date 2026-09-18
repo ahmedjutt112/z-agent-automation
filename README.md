@@ -114,6 +114,93 @@ cd /home/z && uv run pytest /home/z/my-project/apps/automation-service/tests/ /h
 uv run pytest /home/z/my-project/apps/automation-service/tests/test_scheduler.py -v
 ```
 
+## Deployment
+
+### Docker (one-command startup — master prompt §93)
+
+The repo ships a multi-stage `Dockerfile` for the backend, an
+`apps/desktop/Dockerfile` for serving the renderer as a static web app via
+nginx, and a `docker-compose.yml` that wires them together with an optional
+nginx reverse proxy.
+
+```bash
+# 1. Copy .env.example -> .env and fill in real values (DATABASE_URL,
+#    TURSO_AUTH_TOKEN, VERCEL_AI_GATEWAY_KEY, OAuth creds, etc.)
+cp .env.example .env
+$EDITOR .env
+
+# 2. Build + start everything (backend + frontend + nginx reverse proxy).
+#    The Makefile syncs /home/z/uv.lock into the build context first.
+make docker-build
+make docker-up
+
+# 3. Visit the web UI.
+open http://localhost:8080      # direct frontend (no TLS)
+# or
+open http://localhost            # through the nginx reverse proxy (:80)
+```
+
+The backend container exposes `8765:8765` so the Electron desktop app
+(running on the host) can hit it directly. The frontend publishes `8080:80`
+for browser-only access. The optional `nginx` service publishes `80:80` +
+`443:443` for production-grade ingress with SSL termination.
+
+### Manual (development)
+
+See [Quick start](#quick-start) above for the local uv + npm flow. Use this
+mode when iterating on the codebase — Docker rebuilds are slower than
+`uvicorn --reload` + Vite HMR.
+
+### Production (TLS + systemd)
+
+For a real deployment, layer the following on top of the Docker compose stack:
+
+1. **TLS certificates** — mount Let's Encrypt certs into the nginx service:
+   ```bash
+   # In .env:
+   CERT_PATH=/etc/letsencrypt/live/your-domain.com/fullchain.pem
+   KEY_PATH=/etc/letsencrypt/live/your-domain.com/privkey.pem
+   ```
+   The `nginx.conf` ships an HTTPS server block that enables HSTS +
+   `Strict-Transport-Security` automatically.
+
+2. **Systemd** — for non-Docker deployments, run the backend under systemd
+   with a unit file like:
+   ```ini
+   [Unit]
+   Description=AI Automation Service
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=automation
+   WorkingDirectory=/opt/z-agent/apps/automation-service
+   EnvironmentFile=/opt/z-agent/.env
+   ExecStart=/opt/z-agent/.venv/bin/uvicorn \
+     automation_service.main:app --host 127.0.0.1 --port 8765
+   Restart=always
+   RestartSec=3
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+   Note the binding to `127.0.0.1` (per master prompt §5) — nginx proxies
+   :443 → :8765 on localhost only, so the FastAPI service is never directly
+   reachable from the internet.
+
+3. **Environment** — copy `.env.example` to `.env` and fill in real values
+   for at minimum `DATABASE_URL`, `TURSO_AUTH_TOKEN`, and
+   `VERCEL_AI_GATEWAY_KEY`. Set `AUTOMATION_MOCK_MODE=false` for real
+   automation, and set `AUTOMATION_IPC_TOKEN` to a long random string so the
+   API requires bearer auth from the Electron renderer / nginx.
+
+### One-command startup (master prompt §93)
+
+The Docker flow above satisfies the §93 Developer Experience requirement:
+after `cp .env.example .env` + `make docker-up`, the entire stack
+(backend + frontend + reverse proxy + SSL termination) is up on a single
+host with a single command.
+
 ## Configuration
 
 All secrets live in `/home/z/my-project/.env` (gitignored). See `.env.example` for the full template.

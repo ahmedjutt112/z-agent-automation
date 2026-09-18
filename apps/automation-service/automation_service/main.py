@@ -43,11 +43,15 @@ from .api.files_routes import router as files_router
 from .api.history_routes import router as history_router
 from .api.ai_models_routes import router as ai_models_router
 from .api.permissions_routes import router as permissions_router
+from .api.agent_routes import router as agent_router
+from .api.team_routes import router as team_router
+from .api.analytics_routes import router as analytics_router
 from .scheduler.manager import scheduler_manager
 from .scheduler.api import router as schedules_router
 from .voice.api import router as voice_router
 from .memory.api import router as memory_router
 from .profiles.api import router as profiles_router
+from .plugins.manager import plugin_manager
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +63,19 @@ from .profiles.api import router as profiles_router
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ensure_runtime_dirs()
     tool_registry.discover()
+    # Auto-load all installed plugins (master prompt §53)
+    try:
+        plugin_manager.discover()
+        for spec in plugin_manager.list_available():
+            try:
+                plugin_manager.load(spec.name)
+            except Exception as exc:  # noqa: BLE001
+                # Plugin load failure must NOT crash the service
+                from loguru import logger
+                logger.warning("Failed to load plugin '{}': {}", spec.name, exc)
+    except Exception as exc:  # noqa: BLE001
+        from loguru import logger
+        logger.warning("Plugin discovery failed: {}", exc)
     event_bus.publish("SERVICE_STARTED", {"version": settings.service_version})
     await scheduler_manager.start()
     try:
@@ -92,7 +109,10 @@ app = FastAPI(
         {"name": "profiles", "description": "Multi-profile support (section 49) — personal/work/dev/test sandboxes."},
         {"name": "logs", "description": "Debug log streaming + recent/export (master prompt §38, §57, §73)."},
         {"name": "screenshots", "description": "Screenshot listing, retrieval, deletion, and OCR (master prompt §15, §73)."},
-        {"name": "assistant", "description": "Phase 5 Advanced AI OS Assistant (master prompt §83) — contextual multi-step automation: prepare-meeting, morning routine, end-of-day summary, research, file organisation. Plans never auto-execute (§66)."},
+        {"name": "assistant", "description": "Phase 5 Advanced AI OS Assistant (master prompt section 83) - contextual multi-step automation: prepare-meeting, morning routine, end-of-day summary, research, file organisation. Plans never auto-execute (section 66)."},
+        {"name": "agent", "description": "Phase 3 AI Computer Agent (master prompt section 81) - vision-based screen analysis, autonomous execution, recovery, and AI workflow generation. All routes honor mock mode + section 86 minimum confidence threshold."},
+        {"name": "teams", "description": "Phase 4 Professional RPA (master prompt section 82) - multi-user teams, workspaces, RBAC, enterprise policies. All administrative endpoints are gated by role-based permissions."},
+        {"name": "analytics", "description": "Phase 4 execution analytics (master prompt section 82) - workflow run counts, success rates, top tools, top workflows, leaderboard, CSV/JSON export."},
     ],
 )
 
@@ -402,3 +422,14 @@ app.include_router(ai_models_router, tags=["ai-models"])
 # Permissions — master prompt §9 (risk levels) + §10 (human confirmation)
 # + §55 (security architecture) + §88 (rate limits).
 app.include_router(permissions_router, prefix="/permissions", tags=["permissions"])
+# Phase 3 AI Computer Agent — master prompt §81 (multi-step autonomous
+# execution), §14 (screen understanding), §86 (vision confidence
+# threshold), §85 (Autonomous Mode — never bypasses security controls).
+app.include_router(agent_router, prefix="/agent", tags=["agent"])
+# Phase 4 Professional RPA — master prompt §82 (multi-user support,
+# teams, workspaces, RBAC, enterprise policies, execution analytics).
+# The team router carries its own RBAC dependencies (require_permission)
+# in addition to the IPC bearer token; the analytics router carries
+# the IPC bearer token + filters by team_id.
+app.include_router(team_router, prefix="/teams", tags=["teams"])
+app.include_router(analytics_router, prefix="/analytics", tags=["analytics"])

@@ -24,6 +24,8 @@ import { Schedules } from "./pages/Schedules";
 import { History } from "./pages/History";
 import { AIModels } from "./pages/AIModels";
 import { Permissions } from "./pages/Permissions";
+import { Teams } from "./pages/Teams";
+import { Analytics } from "./pages/Analytics";
 import { EmergencyBanner } from "./components/EmergencyBanner";
 import { useStore } from "./store";
 
@@ -87,6 +89,8 @@ function renderView(view: string): React.ReactNode {
     case "history": return <History />;
     case "ai-models": return <AIModels />;
     case "permissions": return <Permissions />;
+    case "teams": return <Teams />;
+    case "analytics": return <Analytics />;
     default: return <Dashboard />;
   }
 }

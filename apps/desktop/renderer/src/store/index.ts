@@ -35,6 +35,8 @@ export type ViewId =
   | "integrations"
   | "permissions"
   | "voice-settings"
+  | "teams"
+  | "analytics"
   | "settings";
 
 const DEV_MODE_KEY = "zai.developer_mode.v1";

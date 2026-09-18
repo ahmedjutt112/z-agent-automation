@@ -1,0 +1,123 @@
+# ============================================================================
+# docker-compose.yml — single-file orchestration for the AI Automation Agent
+# ----------------------------------------------------------------------------
+# Three services on a single default bridge network:
+#   1. backend  — FastAPI automation service (port 8765, internal only)
+#   2. frontend — Vite renderer served via nginx (port 80, internal only)
+#   3. nginx    — reverse proxy (ports 80 + 443 published to host)
+#
+# No database service is required — Turso libSQL is cloud-hosted via
+# DATABASE_URL + TURSO_AUTH_TOKEN (see .env).
+#
+# Usage:
+#   make docker-build   # syncs /home/z/uv.lock → ./uv.lock + docker compose build
+#   make docker-up      # docker compose up -d
+#   make docker-logs    # docker compose logs -f
+#   make docker-down    # docker compose down
+# ============================================================================
+
+services:
+  # --------------------------------------------------------------------------
+  # backend — Python FastAPI service (automation_service.main:app)
+  # --------------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: z-agent-backend:latest
+    container_name: z-agent-backend
+    env_file:
+      # .env lives at /home/z/my-project/.env (gitignored). The compose file
+      # is run from the repo root, so the relative path resolves correctly.
+      - ./.env
+    environment:
+      # Override AUTOMATION_HOST so the service binds to all interfaces
+      # inside the container — 127.0.0.1 would be unreachable from `nginx`.
+      AUTOMATION_HOST: "0.0.0.0"
+      AUTOMATION_PORT: "8765"
+      # PROJECT_ROOT points at /app (set in the Dockerfile) so the
+      # ServiceSettings paths resolve correctly inside the container.
+      PROJECT_ROOT: "/app"
+    ports:
+      # Publish 8765 to the host so `make backup` (curl localhost:8765) works
+      # and so the Electron desktop app (running on the host, NOT in Docker)
+      # can hit the backend directly. In production behind nginx, comment
+      # this out and only expose via the nginx reverse proxy on :80 / :443.
+      - "8765:8765"
+    volumes:
+      # Persist runtime state across container restarts.
+      - ./logs:/app/logs
+      - ./workflows:/app/workflows
+      - ./download:/app/download
+      - ./backups:/app/backups
+      # Persist the local SQLite fallback (master prompt §27) so a fresh
+      # container doesn't lose data if Turso is unreachable.
+      - ./db:/app/db
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - default
+
+  # --------------------------------------------------------------------------
+  # frontend — Vite renderer served via nginx (Electron cannot run in Docker)
+  # --------------------------------------------------------------------------
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/desktop/Dockerfile
+      args:
+        # Build-time arg: the SPA will call this URL at runtime. Inside the
+        # compose network, the backend is reachable at http://backend:8765.
+        VITE_API_URL: "http://backend:8765"
+    image: z-agent-frontend:latest
+    container_name: z-agent-frontend
+    ports:
+      # Expose :8080 on the host for direct browser access without the reverse
+      # proxy. nginx publishes :80 → / and proxies /api → backend:8765.
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - default
+
+  # --------------------------------------------------------------------------
+  # nginx — optional reverse proxy with SSL termination
+  # --------------------------------------------------------------------------
+  # Only enable this service for production deployments. The .env file
+  # must define CERT_PATH + KEY_PATH (or comment this service out entirely
+  # for local dev — the frontend container is directly reachable on :8080).
+  nginx:
+    image: nginx:alpine
+    container_name: z-agent-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # The reverse-proxy config — separate from the frontend's own
+      # nginx-frontend.conf shipped inside the frontend image.
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # SSL certs (gitignored — mount from /etc/letsencrypt/live/<domain>).
+      - ${CERT_PATH:-./certs/fullchain.pem}:/etc/nginx/certs/fullchain.pem:ro
+      - ${KEY_PATH:-./certs/privkey.pem}:/etc/nginx/certs/privkey.pem:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - default
+
+# Default bridge network — Docker creates it automatically when `networks:`
+# is omitted, but declaring it explicitly makes the topology obvious and
+# lets other services (e.g. a future worker container) opt in by name.
+networks:
+  default:
+    driver: bridge

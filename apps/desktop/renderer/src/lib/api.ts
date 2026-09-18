@@ -1147,4 +1147,434 @@ export const api = {
         { method: "POST" },
       ),
   },
+
+  // ---- Agent (Phase 3 AI Computer Agent — master prompt §81) ----
+  // Wraps the /agent/* endpoints. All calls honor mock mode + the
+  // §86 minimum confidence threshold (returns found=false when below).
+  agent: {
+    observe: (body: { screenshot_path?: string }) =>
+      request<{
+        screenshot_path: string;
+        active_app: string | null;
+        active_window: string | null;
+        ui_elements: Array<{
+          text: string;
+          type: string;
+          bounding_box: { x: number; y: number; width: number; height: number };
+          confidence: number;
+        }>;
+        text_on_screen: string[];
+        ai_summary: string;
+        observed_at: string;
+      }>("/agent/observe", { method: "POST", body: JSON.stringify(body) }),
+
+    findElement: (body: {
+      description: string;
+      screenshot_path?: string;
+      browser_session_id?: string;
+    }) =>
+      request<{
+        found: boolean;
+        reason?: string;
+        description?: string;
+        location?: {
+          x: number;
+          y: number;
+          width: number;
+          height: number;
+          confidence: number;
+          method: string;
+        };
+      }>("/agent/find-element", { method: "POST", body: JSON.stringify(body) }),
+
+    verifyAction: (body: { action: string; expected_result: string }) =>
+      request<{
+        verified: boolean;
+        evidence: string;
+        screenshot_path: string | null;
+      }>("/agent/verify-action", { method: "POST", body: JSON.stringify(body) }),
+
+    analyzeScreenshot: (body: { image_path: string; question?: string }) =>
+      request<{
+        description: string;
+        elements: Array<unknown>;
+        suggested_action: string | null;
+        reasoning: string;
+      }>("/agent/analyze-screenshot", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+
+    compareScreenshots: (body: { before: string; after: string }) =>
+      request<{
+        changes: string[];
+        new_elements: Array<unknown>;
+        removed_elements: Array<unknown>;
+        significant_change: boolean;
+      }>("/agent/compare-screenshots", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+
+    recover: (body: {
+      failed_action: string;
+      error?: string;
+      screenshot_path?: string;
+      step_context?: Record<string, unknown>;
+      attempt_number?: number;
+    }) =>
+      request<{
+        strategy: string;
+        alternative_actions: string[];
+        should_retry: boolean;
+        should_skip: boolean;
+        should_ask_user: boolean;
+        reason: string;
+        retry_delay_seconds: number;
+      }>("/agent/recover", { method: "POST", body: JSON.stringify(body) }),
+
+    executeAutonomously: (body: {
+      goal: string;
+      max_steps?: number;
+      mode?: "assist" | "guided" | "autonomous";
+    }) =>
+      request<{
+        goal: string;
+        plan_id: string;
+        mode: string;
+        steps_executed: number;
+        steps_succeeded: number;
+        steps_failed: number;
+        steps_skipped: number;
+        duration_seconds: number;
+        final_state: string;
+        learnings: string[];
+        execution_log: Array<{
+          step_id: string;
+          action: string;
+          status: string;
+          duration_ms?: number;
+          error?: string | null;
+          recovery_strategy?: string | null;
+          observed_at?: string | null;
+        }>;
+        aborted: boolean;
+        abort_reason?: string | null;
+        started_at: string;
+        finished_at?: string | null;
+      }>("/agent/execute-autonomously", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+
+    generateWorkflow: (body: { description: string }) =>
+      request<{
+        workflow: Workflow;
+        executed: boolean;
+      }>("/agent/generate-workflow", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+
+    improveWorkflow: (body: { workflow_id: string; feedback: string }) =>
+      request<{
+        workflow: Workflow;
+        saved: boolean;
+      }>("/agent/improve-workflow", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+
+    suggestions: () =>
+      request<
+        Array<{
+          title: string;
+          description: string;
+          estimated_time_saved_per_week: string;
+          proposed_workflow: Workflow;
+        }>
+      >("/agent/suggestions"),
+  },
+
+  // ---- Teams (Phase 4 — master prompt §82) ----
+  // Wraps the /teams/* endpoints. Each team carries members, workspaces,
+  // and enterprise policies. All write endpoints require an X-User-Id
+  // header (the Electron shell injects this from the OS-level session).
+  teams: {
+    list: () =>
+      request<{
+        teams: Array<TeamSummary & { my_role?: string | null }>;
+        count: number;
+        mock_mode?: boolean;
+      }>("/teams"),
+
+    create: (body: {
+      name: string;
+      description?: string;
+      max_members?: number;
+      max_workflows?: number;
+    }) =>
+      request<TeamSummary>("/teams", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+
+    get: (teamId: string) =>
+      request<TeamSummary & { my_role?: string | null }>(
+        `/teams/${encodeURIComponent(teamId)}`,
+      ),
+
+    update: (teamId: string, body: {
+      name?: string;
+      description?: string;
+      max_members?: number;
+      max_workflows?: number;
+    }) =>
+      request<TeamSummary>(`/teams/${encodeURIComponent(teamId)}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+
+    delete: (teamId: string) =>
+      request<{ team_id: string; deleted: boolean }>(
+        `/teams/${encodeURIComponent(teamId)}`,
+        { method: "DELETE" },
+      ),
+
+    // Members
+    listMembers: (teamId: string) =>
+      request<{ members: TeamMember[]; count: number }>(
+        `/teams/${encodeURIComponent(teamId)}/members`,
+      ),
+
+    inviteMember: (teamId: string, body: { email: string; role?: string }) =>
+      request<TeamMember>(
+        `/teams/${encodeURIComponent(teamId)}/members`,
+        { method: "POST", body: JSON.stringify(body) },
+      ),
+
+    updateMember: (
+      teamId: string,
+      userId: string,
+      body: { role: string },
+    ) =>
+      request<TeamMember>(
+        `/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(userId)}`,
+        { method: "PUT", body: JSON.stringify(body) },
+      ),
+
+    removeMember: (teamId: string, userId: string) =>
+      request<{ team_id: string; user_id: string; removed: boolean }>(
+        `/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(userId)}`,
+        { method: "DELETE" },
+      ),
+
+    // Workspaces
+    listWorkspaces: (teamId: string) =>
+      request<{ workspaces: Workspace[]; count: number }>(
+        `/teams/${encodeURIComponent(teamId)}/workspaces`,
+      ),
+
+    createWorkspace: (
+      teamId: string,
+      body: { name: string; description?: string },
+    ) =>
+      request<Workspace>(
+        `/teams/${encodeURIComponent(teamId)}/workspaces`,
+        { method: "POST", body: JSON.stringify(body) },
+      ),
+
+    // Policies
+    listPolicies: (teamId: string) =>
+      request<{ policies: EnterprisePolicy[]; count: number }>(
+        `/teams/${encodeURIComponent(teamId)}/policies`,
+      ),
+
+    createPolicy: (
+      teamId: string,
+      body: {
+        policy_type: string;
+        policy_value?: unknown;
+        enforced?: boolean;
+      },
+    ) =>
+      request<EnterprisePolicy>(
+        `/teams/${encodeURIComponent(teamId)}/policies`,
+        { method: "POST", body: JSON.stringify(body) },
+      ),
+
+    updatePolicy: (
+      teamId: string,
+      policyId: string,
+      body: { policy_value?: unknown; enforced?: boolean },
+    ) =>
+      request<EnterprisePolicy>(
+        `/teams/${encodeURIComponent(teamId)}/policies/${encodeURIComponent(policyId)}`,
+        { method: "PUT", body: JSON.stringify(body) },
+      ),
+
+    deletePolicy: (teamId: string, policyId: string) =>
+      request<{ policy_id: string; deleted: boolean }>(
+        `/teams/${encodeURIComponent(teamId)}/policies/${encodeURIComponent(policyId)}`,
+        { method: "DELETE" },
+      ),
+  },
+
+  // ---- Analytics (Phase 4 — master prompt §82) ----
+  // Execution analytics. Summary returns top-line metrics; events returns
+  // the raw event stream; leaderboard returns top contributors; export
+  // downloads CSV or JSON.
+  analytics: {
+    summary: (params?: {
+      team_id?: string;
+      date_from?: string;
+      date_to?: string;
+    }) => {
+      const qs = new URLSearchParams();
+      if (params?.team_id) qs.set("team_id", params.team_id);
+      if (params?.date_from) qs.set("date_from", params.date_from);
+      if (params?.date_to) qs.set("date_to", params.date_to);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return request<AnalyticsSummary>(`/analytics/summary${suffix}`);
+    },
+
+    events: (params?: {
+      team_id?: string;
+      user_id?: string;
+      event_type?: string;
+      date_from?: string;
+      date_to?: string;
+      limit?: number;
+      offset?: number;
+    }) => {
+      const qs = new URLSearchParams();
+      if (params?.team_id) qs.set("team_id", params.team_id);
+      if (params?.user_id) qs.set("user_id", params.user_id);
+      if (params?.event_type) qs.set("event_type", params.event_type);
+      if (params?.date_from) qs.set("date_from", params.date_from);
+      if (params?.date_to) qs.set("date_to", params.date_to);
+      if (params?.limit !== undefined) qs.set("limit", String(params.limit));
+      if (params?.offset !== undefined) qs.set("offset", String(params.offset));
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return request<{ events: AnalyticsEvent[]; count: number; total: number }>(
+        `/analytics/events${suffix}`,
+      );
+    },
+
+    leaderboard: (params?: { team_id?: string; limit?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.team_id) qs.set("team_id", params.team_id);
+      if (params?.limit !== undefined) qs.set("limit", String(params.limit));
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return request<{
+        leaderboard: Array<{ user_id: string; activity_count: number }>;
+        count: number;
+      }>(`/analytics/leaderboard${suffix}`);
+    },
+
+    export: (params: {
+      format: "json" | "csv";
+      team_id?: string;
+      date_from?: string;
+      date_to?: string;
+    }): Promise<Blob> => {
+      const qs = new URLSearchParams();
+      qs.set("format", params.format);
+      if (params.team_id) qs.set("team_id", params.team_id);
+      if (params.date_from) qs.set("date_from", params.date_from);
+      if (params.date_to) qs.set("date_to", params.date_to);
+      return fetch(`${BASE_URL}/analytics/export?${qs.toString()}`).then((r) => {
+        if (!r.ok) {
+          return r.json().catch(() => ({ detail: r.statusText })).then((body) => {
+            throw new Error(`${r.status}: ${body.detail || "export failed"}`);
+          });
+        }
+        return r.blob();
+      });
+    },
+  },
 };
+
+// ---------------------------------------------------------------------------
+// Phase 4 type declarations (master prompt §82)
+// ---------------------------------------------------------------------------
+
+export interface TeamSummary {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string | null;
+  owner_id: string;
+  max_members: number;
+  max_workflows: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface TeamMember {
+  id?: string;
+  team_id: string;
+  user_id: string;
+  email?: string | null;
+  role: string; // owner | admin | member | viewer
+  status: string; // pending | active | revoked
+  invited_at?: string | null;
+  joined_at?: string | null;
+}
+
+export interface Workspace {
+  id: string;
+  team_id: string;
+  name: string;
+  description?: string | null;
+  created_by: string;
+  created_at?: string | null;
+}
+
+export interface EnterprisePolicy {
+  id: string;
+  team_id: string;
+  policy_type: string;
+  policy_value?: unknown;
+  enforced: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface AnalyticsSummary {
+  total_workflows_run: number;
+  success_rate: number;
+  avg_duration_ms: number;
+  total_ai_calls: number;
+  estimated_cost: number;
+  top_tools: Array<{ tool: string; count: number; avg_duration_ms: number }>;
+  top_workflows: Array<{
+    workflow: string;
+    runs: number;
+    success_rate: number;
+  }>;
+  daily_breakdown: Array<{
+    date: string;
+    runs: number;
+    successes: number;
+    failures: number;
+  }>;
+  filters: {
+    team_id?: string | null;
+    user_id?: string | null;
+    date_from?: string | null;
+    date_to?: string | null;
+  };
+  mock_mode: boolean;
+}
+
+export interface AnalyticsEvent {
+  id: number;
+  team_id?: string | null;
+  user_id?: string | null;
+  event_type: string;
+  event_data?: Record<string, unknown> | null;
+  duration_ms?: number | null;
+  cost_estimate?: number | null;
+  created_at?: string | null;
+}

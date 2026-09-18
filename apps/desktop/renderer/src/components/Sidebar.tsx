@@ -18,6 +18,8 @@ const NAV_ITEMS: { id: ViewId; label: string }[] = [
   { id: "schedules", label: "Schedules" },
   { id: "history", label: "History" },
   { id: "logs", label: "Logs" },
+  { id: "teams", label: "Teams" },
+  { id: "analytics", label: "Analytics" },
 ];
 
 const SECONDARY_ITEMS: { id: ViewId; label: string }[] = [

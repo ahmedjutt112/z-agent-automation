@@ -9,13 +9,14 @@ from typing import Optional
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
+    Index,
     Integer,
+    JSON,
     String,
     Text,
-    Float,
-    JSON,
-    Index,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -42,6 +43,11 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     email: Mapped[Optional[str]] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Master prompt §82 — multi-user + team / workspace support.
+    team_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("teams.id"), nullable=True, default=None
+    )
+    default_workspace_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
@@ -480,3 +486,115 @@ Index("idx_tasks_status_created", Task.status, Task.created_at)
 Index("idx_task_logs_task_ts", TaskLog.task_id, TaskLog.timestamp)
 Index("idx_audit_logs_ts", AuditLog.timestamp)
 Index("idx_workflow_runs_status", WorkflowRun.status)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Professional RPA (master prompt §82)
+# Multi-user support, teams, workspaces, RBAC, enterprise policies,
+# execution analytics. Existing marketplace / plugins / integrations
+# modules from sessions 5-7 already provide the marketplace / plugins /
+# integrations mentioned in §82 — these models add the team + policy
+# + analytics layer on top.
+# ---------------------------------------------------------------------------
+
+
+class Team(Base):
+    """Master prompt §82 — teams for multi-user collaboration."""
+    __tablename__ = "teams"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    slug: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    max_members: Mapped[int] = mapped_column(Integer, default=10)
+    max_workflows: Mapped[int] = mapped_column(Integer, default=100)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class TeamMember(Base):
+    """Maps users to teams with roles (owner/admin/member/viewer)."""
+    __tablename__ = "team_members"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(32), default="member")  # owner/admin/member/viewer
+    invited_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    joined_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/active/revoked
+    __table_args__ = (
+        UniqueConstraint("team_id", "user_id", name="uq_team_members_team_user"),
+    )
+
+
+class Workspace(Base):
+    """Master prompt §50 — workspace system (team-scoped)."""
+    __tablename__ = "workspaces"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class EnterprisePolicy(Base):
+    """Master prompt §82 — enterprise policies.
+
+    Policy types:
+      - ``max_risk_level``        — block actions above a risk threshold
+      - ``allowed_tools``         — only the listed tools may execute
+      - ``blocked_tools``         — the listed tools are forbidden
+      - ``allowed_domains``       — only these web domains may be navigated to
+      - ``require_approval_for``  — actions matching the list need admin approval
+      - ``max_daily_runs``        — daily per-team execution cap
+      - ``data_residency``        — restrict where data is stored
+    """
+    __tablename__ = "enterprise_policies"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"), nullable=False, index=True)
+    policy_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_value: Mapped[Optional[dict]] = mapped_column(JSON)
+    enforced: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class AnalyticsEvent(Base):
+    """Master prompt §82 — execution analytics.
+
+    Event types:
+      - ``workflow_run``           — a workflow was started
+      - ``task_completed``         — a task finished successfully
+      - ``task_failed``            — a task failed
+      - ``tool_used``              — a tool was invoked
+      - ``ai_call``                — an AI provider was called
+      - ``permission_granted``     — a permission grant was made
+      - ``permission_denied``      — the permission engine denied an action
+      - ``login``                  — user login
+      - ``export``                 — data export
+    """
+    __tablename__ = "analytics_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    team_id: Mapped[Optional[str]] = mapped_column(ForeignKey("teams.id"), index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id"), index=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    event_data: Mapped[Optional[dict]] = mapped_column(JSON)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer)
+    cost_estimate: Mapped[Optional[float]] = mapped_column(Float)  # for AI calls
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+
+# Helpful indexes for the new tables (master prompt §95)
+Index("idx_team_members_team_id", TeamMember.team_id)
+Index("idx_team_members_user_id", TeamMember.user_id)
+Index("idx_workspaces_team_id", Workspace.team_id)
+Index("idx_enterprise_policies_team_id", EnterprisePolicy.team_id)
+Index("idx_analytics_events_team_id", AnalyticsEvent.team_id)
+Index("idx_analytics_events_user_id", AnalyticsEvent.user_id)
+Index("idx_analytics_events_event_type", AnalyticsEvent.event_type)
+Index("idx_analytics_events_created_at", AnalyticsEvent.created_at)
