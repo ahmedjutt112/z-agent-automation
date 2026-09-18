@@ -799,6 +799,31 @@ async def invite_member(
         session.close()
 
 
+# ---------------------------------------------------------------------------
+# Alias — POST /teams/{team_id}/invite (task-spec endpoint name).
+# Behaves identically to POST /teams/{team_id}/members. Both routes are
+# supported so callers using either name set work — the canonical
+# operation is "invite a member", and both URLs map to the same handler.
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/{team_id}/invite",
+    status_code=status.HTTP_201_CREATED,
+    tags=["teams"],
+)
+async def invite_member_alias(
+    team_id: str,
+    req: InviteMemberRequest,
+    user: dict = Depends(require_permission(Permission.INVITE_MEMBERS)),
+) -> dict[str, Any]:
+    """Alias for POST /teams/{team_id}/members — invite a member by email.
+
+    Requires INVITE_MEMBERS permission (admin+).
+    """
+    return await invite_member(team_id=team_id, req=req, user=user)
+
+
 @router.get(
     "/{team_id}/members",
     dependencies=[Depends(_verify_ipc_token)],

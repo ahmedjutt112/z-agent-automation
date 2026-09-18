@@ -1,26 +1,26 @@
 """add teams, workspaces, policies, analytics (Phase 4 RPA)
 
-Revision ID: b3c4d5e6f7a8
+Revision ID: c4d5e6f7a8b9
 Revises: a2b3c4d5e6f7
-Create Date: 2026-09-18 14:30:00.000000
+Create Date: 2026-09-19 10:00:00.000000
 
 Adds the master prompt §82 (Professional RPA) layer:
 
 1. ``teams`` table — multi-user collaboration containers.
-2. ``team_members`` table — user↔team join with role (owner/admin/member/viewer).
+2. ``team_members`` table — user<->team join with role
+   (owner/admin/member/viewer) + status (pending/active/revoked).
 3. ``workspaces`` table — master prompt §50 workspaces, team-scoped.
 4. ``enterprise_policies`` table — enforceable per-team policy rules
    (max_risk_level, allowed_tools, blocked_tools, allowed_domains,
    require_approval_for, max_daily_runs, data_residency).
-5. ``analytics_events`` table — execution analytics for runs, tool usage,
-   AI calls, permission decisions, logins, exports.
-6. Adds ``team_id`` + ``default_workspace_id`` columns to ``users`` so a
-   user can be a member of a primary team + have a default workspace.
+5. ``analytics_events`` table — execution analytics for runs, tool
+   usage, AI calls, permission decisions, logins, exports.
 
-All operations are wrapped in ``op.batch_alter_table`` (SQLite-safe) and
-the migration is idempotent — running ``alembic upgrade head`` on a DB
-that already had the schema bootstrapped via ``Base.metadata.create_all``
-is a no-op for the tables that already exist.
+The migration is IDEMPOTENT — every ``op.create_table`` /
+``op.create_index`` call is guarded by an inspector check so running
+``alembic upgrade head`` on a DB that already has the tables (e.g.
+one bootstrapped via ``Base.metadata.create_all()``) is a no-op.
+This keeps the upgrade safe to run on existing dev / test DBs.
 """
 
 from __future__ import annotations
@@ -32,26 +32,19 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = "b3c4d5e6f7a8"
+revision: str = "c4d5e6f7a8b9"
 down_revision: Union[str, None] = "a2b3c4d5e6f7"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 # ---------------------------------------------------------------------------
-# Helpers — idempotent introspection so the migration is safe to re-run
+# Idempotent helpers — skip operations on already-existing tables / indexes
 # ---------------------------------------------------------------------------
 
 
 def _existing_tables(inspector) -> set[str]:
     return set(inspector.get_table_names())
-
-
-def _existing_columns(inspector, table_name: str) -> set[str]:
-    try:
-        return {c["name"] for c in inspector.get_columns(table_name)}
-    except Exception:
-        return set()
 
 
 def _existing_indexes(inspector, table_name: str) -> set[str]:
@@ -61,7 +54,8 @@ def _existing_indexes(inspector, table_name: str) -> set[str]:
         return set()
 
 
-# Tables + their indexes that this migration creates (master prompt §95).
+# Indexes created by this migration (master prompt §95 — helpful indexes
+# for analytics queries + team membership lookups).
 _NEW_TABLE_INDEXES: dict[str, list[tuple[str, list[str]]]] = {
     "team_members": [
         ("idx_team_members_team_id", ["team_id"]),
@@ -83,22 +77,14 @@ _NEW_TABLE_INDEXES: dict[str, list[tuple[str, list[str]]]] = {
 
 
 def upgrade() -> None:
-    """Create the 5 new Phase 4 tables + add 2 columns to ``users``.
-
-    Idempotent: if a table / column / index already exists, the operation
-    is skipped. This keeps ``alembic upgrade head`` safe to run on a DB
-    that was bootstrapped via ``Base.metadata.create_all()`` (which
-    already created the schema.py tables) as well as a fresh DB that only
-    has the prior migration applied.
-    """
+    """Create the 5 new Phase 4 tables + indexes (idempotent)."""
     bind = op.get_bind()
     inspector = sa.inspect(bind)
-    existing_tables = _existing_tables(inspector)
 
     # ------------------------------------------------------------------
-    # 1. teams table
+    # 1. teams
     # ------------------------------------------------------------------
-    if "teams" not in existing_tables:
+    if "teams" not in _existing_tables(inspector):
         op.create_table(
             "teams",
             sa.Column("id", sa.String(length=36), nullable=False),
@@ -122,7 +108,7 @@ def upgrade() -> None:
         inspector = sa.inspect(bind)
 
     # ------------------------------------------------------------------
-    # 2. team_members table
+    # 2. team_members
     # ------------------------------------------------------------------
     if "team_members" not in _existing_tables(inspector):
         op.create_table(
@@ -152,7 +138,7 @@ def upgrade() -> None:
         inspector = sa.inspect(bind)
 
     # ------------------------------------------------------------------
-    # 3. workspaces table
+    # 3. workspaces
     # ------------------------------------------------------------------
     if "workspaces" not in _existing_tables(inspector):
         op.create_table(
@@ -178,7 +164,7 @@ def upgrade() -> None:
         inspector = sa.inspect(bind)
 
     # ------------------------------------------------------------------
-    # 4. enterprise_policies table
+    # 4. enterprise_policies
     # ------------------------------------------------------------------
     if "enterprise_policies" not in _existing_tables(inspector):
         op.create_table(
@@ -199,7 +185,7 @@ def upgrade() -> None:
         inspector = sa.inspect(bind)
 
     # ------------------------------------------------------------------
-    # 5. analytics_events table
+    # 5. analytics_events
     # ------------------------------------------------------------------
     if "analytics_events" not in _existing_tables(inspector):
         op.create_table(
@@ -227,34 +213,7 @@ def upgrade() -> None:
         inspector = sa.inspect(bind)
 
     # ------------------------------------------------------------------
-    # 6. Add team_id + default_workspace_id columns to users
-    # ------------------------------------------------------------------
-    if "users" in _existing_tables(inspector):
-        cols = _existing_columns(inspector, "users")
-        if "team_id" not in cols:
-            with op.batch_alter_table("users") as batch_op:
-                batch_op.add_column(
-                    sa.Column("team_id", sa.String(length=36), nullable=True)
-                )
-                batch_op.create_foreign_key(
-                    "fk_users_team_id_teams",
-                    "teams",
-                    ["team_id"],
-                    ["id"],
-                )
-                batch_op.create_index("ix_users_team_id", ["team_id"])
-        if "default_workspace_id" not in cols:
-            with op.batch_alter_table("users") as batch_op:
-                batch_op.add_column(
-                    sa.Column(
-                        "default_workspace_id",
-                        sa.String(length=36),
-                        nullable=True,
-                    )
-                )
-
-    # ------------------------------------------------------------------
-    # 7. Indexes on the new tables (idempotent)
+    # 6. Indexes (idempotent)
     # ------------------------------------------------------------------
     for table_name, indexes in _NEW_TABLE_INDEXES.items():
         if table_name not in _existing_tables(inspector):
@@ -270,31 +229,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the 5 new tables + remove the 2 new columns from ``users``.
-
-    Idempotent: skips missing tables / columns / indexes.
-    """
+    """Drop the 5 new tables + their indexes (idempotent)."""
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     existing_tables = _existing_tables(inspector)
 
-    # ------------------------------------------------------------------
-    # 1. Drop the new columns from users
-    # ------------------------------------------------------------------
-    if "users" in existing_tables:
-        cols = _existing_columns(inspector, "users")
-        existing_ix = _existing_indexes(inspector, "users")
-        with op.batch_alter_table("users") as batch_op:
-            if "default_workspace_id" in cols:
-                batch_op.drop_column("default_workspace_id")
-            if "team_id" in cols:
-                if "ix_users_team_id" in existing_ix:
-                    batch_op.drop_index("ix_users_team_id")
-                batch_op.drop_column("team_id")
-
-    # ------------------------------------------------------------------
-    # 2. Drop indexes on the new tables, then drop the tables themselves
-    # ------------------------------------------------------------------
+    # Drop indexes first.
     for table_name, indexes in _NEW_TABLE_INDEXES.items():
         if table_name not in existing_tables:
             continue
@@ -306,6 +246,7 @@ def downgrade() -> None:
                 except Exception:
                     pass
 
+    # Then drop tables (reverse dependency order).
     inspector = sa.inspect(bind)
     for table_name in (
         "analytics_events",

@@ -642,3 +642,55 @@ def _scrub(value: Any) -> Any:
     if isinstance(value, list):
         return [_scrub(v) for v in value]
     return value
+
+
+# ---------------------------------------------------------------------------
+# Task-spec aliases (Phase 4 — master prompt §82).
+#
+# The canonical names in this module are ``Permission`` / ``ROLE_PERMISSIONS``
+# / ``require_role`` / ``require_permission`` (added in an earlier task).
+# Phase 4 task spec uses shorter names — ``Perm`` / ``ROLE_PERMS`` /
+# ``require_team_role`` / ``require_perm``. We export both so callers using
+# either name set work. The underlying enum / matrix / dependency factories
+# are identical; the aliases are simply bound references.
+# ---------------------------------------------------------------------------
+
+# Short alias for the Permission enum.
+Perm = Permission
+
+# Short alias for the role -> permissions matrix.
+ROLE_PERMS: dict[Role, frozenset[Permission]] = ROLE_PERMISSIONS
+
+
+def require_team_role(min_role: Role) -> Callable[..., Any]:
+    """FastAPI dependency factory — require the user's team role to be at
+    least ``min_role`` in the team identified by the ``team_id`` path
+    parameter (and the ``team_id`` query param as a fallback).
+
+    Role hierarchy: OWNER > ADMIN > MEMBER > VIEWER. A user with a higher
+    role satisfies a lower-role requirement (e.g. an OWNER passes a
+    MEMBER gate). A user with no role on the team gets 403.
+
+    This is a convenience wrapper around ``require_role`` that expands
+    ``min_role`` to the set of all roles at or above it in the hierarchy.
+    """
+    hierarchy = [Role.OWNER, Role.ADMIN, Role.MEMBER, Role.VIEWER]
+    try:
+        idx = hierarchy.index(min_role)
+    except ValueError:
+        # Unknown role — fall through to the empty set so the dependency
+        # always denies (defensive).
+        return require_role()
+    allowed = tuple(hierarchy[: idx + 1])
+    return require_role(*allowed)
+
+
+def require_perm(perm: Permission) -> Callable[..., Any]:
+    """Alias for ``require_permission`` — gates a route on a single
+    permission (e.g. ``INVITE_MEMBERS``) per the RBAC matrix."""
+    return require_permission(perm)
+
+
+def role_allows_perm(role: Role, perm: Permission) -> bool:
+    """Alias for ``role_allows`` — returns True if ``role`` grants ``perm``."""
+    return role_allows(role, perm)
