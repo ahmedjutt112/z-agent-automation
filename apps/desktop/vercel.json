@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "buildCommand": "npm install && npm run build",
+  "outputDirectory": "renderer/dist",
+  "installCommand": "npm install",
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "rewrites": [
+    { "source": "/api/health", "destination": "/api/health" },
+    { "source": "/api/ai/chat", "destination": "/api/ai_chat" },
+    { "source": "/api/providers", "destination": "/api/providers" },
+    { "source": "/api/ai/models", "destination": "/api/providers" },
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
+  ]
+}

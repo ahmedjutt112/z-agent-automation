@@ -52,3 +52,7 @@ upload/
 # Lock files for in-progress state
 *.lock
 
+.vercel
+.env*
+.vercel
+.vercel/

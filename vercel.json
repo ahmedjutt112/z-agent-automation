@@ -4,7 +4,6 @@
   "buildCommand": "npm install && npm run build",
   "outputDirectory": "renderer/dist",
   "installCommand": "npm install",
-  "rootDirectory": "apps/desktop",
   "cleanUrls": true,
   "trailingSlash": false,
   "rewrites": [
