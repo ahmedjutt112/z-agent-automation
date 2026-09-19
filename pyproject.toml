@@ -205,17 +205,12 @@ ripgrepy = { git = "https://github.com/callmemhz/ripgrepy", branch = "master" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = [
-    "apps/automation-service/tests",
-    "tests",
-]
+testpaths = ["apps/automation-service/tests", "tests"]
 markers = [
     "slow: marks tests as slow (deselect with -m 'not slow')",
     "integration: marks tests as real-credential integration tests (deselect with -m 'not integration')",
 ]
-filterwarnings = [
-    "ignore::DeprecationWarning",
-]
+filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.ruff]
 line-length = 100
