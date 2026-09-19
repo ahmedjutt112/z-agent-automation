@@ -26,3 +26,7 @@ LICENSE
 worklog.md
 AGENTS.md
 README.md
+package-lock.json
+tsconfig.json
+capacitor.config.ts
+capacitor.config.json

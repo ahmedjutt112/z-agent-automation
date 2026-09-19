@@ -1,15 +1,13 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "cd apps/desktop && npm install && npm run build",
+  "outputDirectory": "apps/desktop/renderer/dist",
+  "installCommand": "cd apps/desktop && npm install",
   "framework": "vite",
-  "buildCommand": "npm install && npm run build",
-  "outputDirectory": "renderer/dist",
-  "installCommand": "npm install",
-  "cleanUrls": true,
+  "cleanUrls": false,
   "trailingSlash": false,
   "rewrites": [
-    { "source": "/api/health", "destination": "/api/health" },
     { "source": "/api/ai/chat", "destination": "/api/ai_chat" },
-    { "source": "/api/providers", "destination": "/api/providers" },
     { "source": "/api/ai/models", "destination": "/api/providers" },
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ],
@@ -24,15 +22,6 @@
       "source": "/index.html",
       "headers": [
         { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
-      ]
-    },
-    {
-      "source": "/(.*)",
-      "headers": [
-        { "key": "X-Frame-Options", "value": "DENY" },
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
-        { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" }
       ]
     }
   ]

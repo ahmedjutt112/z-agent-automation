@@ -1,0 +1,2 @@
+# Requirements for Vercel serverless Python functions
+# Vercel auto-detects Python when api/*.py files exist + this file is present
