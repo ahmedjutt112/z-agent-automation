@@ -56,3 +56,27 @@ upload/
 .env*
 .vercel
 .vercel/
+
+# Mobile + build artifacts (too large for git, distributed via Releases)
+apps/desktop/android/
+apps/desktop/release/
+apps/desktop/release-win/
+apps/desktop/.vercel/
+apps/desktop/capacitor.config.json
+download/builds/
+*.apk
+*.AppImage
+*.dmg
+*.exe
+*.msi
+*.nupkg
+local.properties
+
+# JDK installs
+jdk/
+jdk17/
+jdk21/
+android-sdk/
+
+# Capacitor + Android
+apps/desktop/android/local.properties

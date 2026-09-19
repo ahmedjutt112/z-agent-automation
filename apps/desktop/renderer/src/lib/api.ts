@@ -4,6 +4,9 @@
  *
  * BASE_URL is configurable via Vite env var VITE_API_URL (defaults to localhost
  * for dev; set to your deployed backend URL for production).
+ *
+ * The same backend serves BOTH the Electron desktop app AND the Android mobile
+ * app (via Capacitor) so they stay in sync via the shared Turso libSQL database.
  */
 
 const BASE_URL = (import.meta as any).env?.VITE_API_URL || "http://127.0.0.1:8765";
