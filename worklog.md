@@ -2094,3 +2094,27 @@ Stage Summary:
   * Consider splitting rbac.py (696 lines) and team_routes.py (1388 lines) into smaller modules to satisfy the "≤400 lines per file" guideline — currently over the limit due to backward-compat alias block + comprehensive endpoint coverage. The split would need to preserve the public API surface (all existing names + endpoints) so existing tests + callers don't break.
   * Add explicit tests for the new aliases: test_rbac_owner_has_all (OWNER has all 10 perms), test_rbac_viewer_has_only_analytics (VIEWER has only VIEW_ANALYTICS), test_enforce_policy_allows_when_no_policy (enforce_policy returns True when no policy exists). These would augment the existing test_rbac_role_permissions + test_enforce_policy_blocks_when_violation tests.
   * Move the Teams + Analytics nav items from NAV_ITEMS to SECONDARY_ITEMS in Sidebar.tsx per the task spec (currently in NAV_ITEMS — functional but doesn't match the task spec's section grouping).
+
+---
+
+Task ID: 10
+Agent: orchestrator (main)
+Task: Build desktop EXE + Android APK that sync via shared backend. Push to GitHub + create release.
+
+Work Log:
+- Phase 1 (Sync architecture): Updated apps/desktop/renderer/src/lib/api.ts to make BASE_URL configurable via VITE_API_URL env var. Created apps/desktop/.env.production pointing both desktop + mobile at https://z-agent-app-musaddiq-s-projects.vercel.app (Vercel-deployed backend). Both apps share the same Turso libSQL cloud DB so workflows/schedules/memories/OAuth tokens sync across devices.
+- Phase 2 (Capacitor for Android): Installed @capacitor/core + @capacitor/cli + @capacitor/android + @capacitor/preferences + @capacitor/haptics + @capacitor/local-notifications + @capacitor/network. Ran `npx cap init "AI Automation Agent" "com.zagent.automation" --web-dir=renderer/dist`. Configured capacitor.config.ts with appId, splash screen, local notifications, Android-specific settings. Ran `npx cap add android` which scaffolded the native Android project. Ran `npx cap sync android` to copy web assets.
+- Phase 3 (Android SDK + APK build): Installed Android SDK cmdline-tools to ~/android-sdk (no root needed). Accepted licenses. Installed platform-tools, platforms;android-34, build-tools;34.0.0. Discovered Java 21 was JRE-only (no javac) — downloaded Temurin JDK 21 (full) to ~/jdk21/jdk-21.0.5+11. Set up android/local.properties pointing at sdk.dir. First build crashed (Gradle daemon OOM with 3.9 GB total RAM, 0 swap). Fixed with `--no-daemon --no-parallel` + `GRADLE_OPTS="-Xmx2g -Dorg.gradle.daemon=false -Dorg.gradle.parallel=false"`. Build succeeded in 44s. APK: 4.7 MB at /home/z/my-project/apps/desktop/android/app/build/outputs/apk/debug/app-debug.apk.
+- Phase 4 (Desktop builds): electron-builder requires Wine for Windows code signing on Linux (not available without root). Workaround: used @electron/packager instead, which produces an unpacked Windows directory without signing. Built Windows portable (130 MB) + Linux AppImage (118 MB, native build via electron-builder).
+- Phase 5 (GitHub release): Created release v0.1.0 with title "v0.1.0 — Cross-platform release (Desktop + Mobile)" + detailed release notes covering both apps + how they sync. Uploaded all 3 artifacts (APK + Windows zip + Linux AppImage) to the release.
+
+Stage Summary:
+- **GitHub release URL**: https://github.com/ahmedjutt112/z-agent-automation/releases/tag/v0.1.0
+- **3 artifacts uploaded**:
+  - AI-Automation-Agent-v0.1.0-android.apk (4.6 MB) — debug APK, Android 8.0+
+  - AI-Automation-Agent-v0.1.0-linux.AppImage (117.6 MB) — single-file executable
+  - AI-Automation-Agent-v0.1.0-windows-portable.zip (129.2 MB) — unzip + run .exe
+- **Sync architecture**: Both apps talk to the same backend URL (VITE_API_URL env var → https://z-agent-app-musaddiq-s-projects.vercel.app). Shared Turso libSQL cloud DB at libsql://custom-musaddiq.aws-ap-northeast-1.turso.io. Same OAuth tokens, workflows, schedules, memories accessible from both desktop + mobile.
+- **Capacitor plugins bundled in APK**: haptics, local-notifications, network, preferences (4 plugins).
+- **Toolchain**: JDK 21 (Temurin) + Android SDK 34 + Gradle 8.14 + Capacitor 8 + Electron 31.7.7 + electron-builder 24.13.3.
+- **Push to GitHub**: commit 982ef9c "Add Capacitor (Android) + Windows + Linux desktop builds" — 8 files changed, +2080 insertions. android/ + release/ + release-win/ + .vercel/ + download/builds/ gitignored (too large for git, distributed via Releases).
