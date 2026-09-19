@@ -7,8 +7,10 @@
   "cleanUrls": false,
   "trailingSlash": false,
   "rewrites": [
-    { "source": "/api/ai/chat", "destination": "/api/ai_chat" },
+    { "source": "/api/ai/chat", "destination": "/api/ai-chat" },
     { "source": "/api/ai/models", "destination": "/api/providers" },
+    { "source": "/api/health", "destination": "/api/health" },
+    { "source": "/api/providers", "destination": "/api/providers" },
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ],
   "headers": [
@@ -22,6 +24,14 @@
       "source": "/index.html",
       "headers": [
         { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" }
       ]
     }
   ]

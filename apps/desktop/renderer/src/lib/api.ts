@@ -2,14 +2,15 @@
  * Automation API client — typed wrappers around fetch() to the Python service.
  * Master prompt §75 — typed API contract.
  *
- * BASE_URL is configurable via Vite env var VITE_API_URL (defaults to localhost
- * for dev; set to your deployed backend URL for production).
+ * BASE_URL is configurable via Vite env var VITE_API_URL.
+ * - In dev (Electron): defaults to http://127.0.0.1:8765 (local Python backend)
+ * - In production (Vercel): empty string → relative URLs (same-origin /api/* routes)
  *
  * The same backend serves BOTH the Electron desktop app AND the Android mobile
  * app (via Capacitor) so they stay in sync via the shared Turso libSQL database.
  */
 
-const BASE_URL = (import.meta as any).env?.VITE_API_URL || "http://127.0.0.1:8765";
+const BASE_URL = import.meta.env.VITE_API_URL || "";
 
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 

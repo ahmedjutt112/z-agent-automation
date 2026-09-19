@@ -787,7 +787,7 @@ function StorageSettings() {
 function PrivacySettings() {
   async function clearMemories() {
     try {
-      await fetch("http://127.0.0.1:8765/memory/user/default", { method: "DELETE" });
+      await fetch(`${import.meta.env.VITE_API_URL || ""}/memory/user/default`, { method: "DELETE" });
       alert("All memories cleared.");
     } catch {
       alert("Failed to clear memories (service unavailable).");
@@ -795,7 +795,7 @@ function PrivacySettings() {
   }
   async function exportData() {
     try {
-      const resp = await fetch("http://127.0.0.1:8765/memory/inspect/default");
+      const resp = await fetch(`${import.meta.env.VITE_API_URL || ""}/memory/inspect/default`);
       const data = await resp.json();
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);

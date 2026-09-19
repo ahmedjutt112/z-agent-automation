@@ -231,7 +231,7 @@ function screenshotUrl(path: string): string {
   // Try the screenshots API. In dev (mock mode) this returns 404 —
   // the broken-image icon is shown. In real mode it serves the PNG.
   const filename = path.split("/").pop();
-  return `http://127.0.0.1:8765/screenshots/file/${encodeURIComponent(filename || "")}`;
+  return `${import.meta.env.VITE_API_URL || ""}/screenshots/file/${encodeURIComponent(filename || "")}`;
 }
 
 /**

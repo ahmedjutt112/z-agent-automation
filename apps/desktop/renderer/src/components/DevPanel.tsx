@@ -23,9 +23,14 @@ import { useStore } from "../store";
 
 const MAX_LOG_LINES = 500;
 const MAX_SCREENSHOTS = 20;
-const LOGS_WS_URL = "ws://127.0.0.1:8765/logs/stream?level=DEBUG";
-const SCREENSHOTS_API = "http://127.0.0.1:8765/screenshots";
-const SCREENSHOT_BASE = "http://127.0.0.1:8765/screenshots";
+const LOGS_WS_URL = (() => {
+  const base = import.meta.env.VITE_API_URL || "";
+  if (base) return `${base.replace(/^http/, "ws")}/logs/stream?level=DEBUG`;
+  // relative — use current page's protocol + host
+  return `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/logs/stream?level=DEBUG`;
+})();
+const SCREENSHOTS_API = `${import.meta.env.VITE_API_URL || ""}/screenshots`;
+const SCREENSHOT_BASE = `${import.meta.env.VITE_API_URL || ""}/screenshots`;
 
 type Tab =
   | "tools"
@@ -198,7 +203,13 @@ export function DevPanel() {
     if (typeof window === "undefined") return;
     let ws: WebSocket | null = null;
     try {
-      ws = new WebSocket("ws://127.0.0.1:8765/events");
+      ws = new WebSocket(
+        (() => {
+          const base = import.meta.env.VITE_API_URL || "";
+          if (base) return `${base.replace(/^http/, "ws")}/events`;
+          return `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/events`;
+        })()
+      );
     } catch {
       ws = null;
     }
@@ -331,12 +342,12 @@ export function DevPanel() {
     let cancelled = false;
     const tick = async () => {
       try {
-        const resp = await fetch("http://127.0.0.1:8765/workflow");
+        const resp = await fetch(`${import.meta.env.VITE_API_URL || ""}/workflow`);
         if (!resp.ok) return;
         const list = await resp.json();
         if (!Array.isArray(list) || list.length === 0) return;
         const latest = list[0];
-        const r2 = await fetch(`http://127.0.0.1:8765/workflow/${latest.id}`);
+        const r2 = await fetch(`${import.meta.env.VITE_API_URL || ""}/workflow/${latest.id}`);
         if (!r2.ok) return;
         const wf = await r2.json();
         if (!cancelled) {
