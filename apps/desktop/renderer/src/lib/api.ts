@@ -1,9 +1,12 @@
 /**
  * Automation API client — typed wrappers around fetch() to the Python service.
  * Master prompt §75 — typed API contract.
+ *
+ * BASE_URL is configurable via Vite env var VITE_API_URL (defaults to localhost
+ * for dev; set to your deployed backend URL for production).
  */
 
-const BASE_URL = "http://127.0.0.1:8765";
+const BASE_URL = (import.meta as any).env?.VITE_API_URL || "http://127.0.0.1:8765";
 
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 
